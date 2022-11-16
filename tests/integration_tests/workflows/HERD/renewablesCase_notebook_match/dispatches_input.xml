@@ -14,7 +14,7 @@
 
   <Case name="renewablesCase_notebook_match">
     <mode>opt</mode>
-    <verbosity>all</verbosity>
+    <verbosity>debug</verbosity>
     <num_arma_samples>1</num_arma_samples>
     <workflow>DISPATCHES</workflow>
     <time_discretization>

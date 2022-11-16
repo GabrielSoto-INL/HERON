@@ -49,10 +49,70 @@ from TEAL.src import main as RunCashFlow
 from HERON.src.Moped import MOPED
 
 DISPATCHES_MODEL_COMPONENT_META={
+  "Nuclear Case": {
+    "pem":{ # TODO: will require some transfer function
+      "Produces": 'hydrogen',
+      "Consumes": 'electricity',
+      "Cashflows":{
+        "Capacity":{
+          "Expressions": 'pem_capacity',
+        },
+        "Dispatch":{
+          "Expressions": ['fs.pem.electricity'],
+        },
+      },
+    },
+    "h2tank":{
+      "Stores": 'hydrogen',
+      "Consumes": {},
+      "Cashflows":{
+        "Capacity":{
+          "Expressions": 'h2_tank_capacity',
+          "Multiplier":  2.016e-3, # H2 Molar Mass = 2.016e-3 kg/mol
+        },
+      },
+    },
+    "h2turbine":{ # TODO: technically also consumes air, will need to revisit
+      "Produces": 'electricity',
+      "Consumes": 'hydrogen',
+      "Cashflows":{
+        "Capacity":{
+          "Expressions": 'h2_turbine_capacity',
+        },
+        "Dispatch":{
+          "Expressions": ['fs.h2_turbine.turbine.work_mechanical',
+            'fs.h2_turbine.compressor.work_mechanical'],
+          "Multiplier":  [-1, -1] # extra multiplier to ensure correct sign
+        },
+      },
+    },
+    "electricity_market":{
+      "Demands":  'electricity',
+      "Consumes": {},
+      "Cashflows":{
+        "Dispatch":{
+          "Expressions": ['fs.np_power_split.np_to_grid_port.electricity',
+            'fs.h2_turbine.turbine.work_mechanical',
+            'fs.h2_turbine.compressor.work_mechanical'],
+          "Multiplier":  [1e-3, -1e-6, -1e-6] # NOTE: h2 turbine is in W, convert to kW
+        },
+      },
+    },
+    "h2_market":{
+      "Demands":  'hydrogen',
+      "Consumes": {},
+      "Cashflows":{
+        "Dispatch":{
+          "Expressions": ['fs.h2_tank.outlet_to_pipeline.flow_mol'],
+          "Multiplier":  [7.2576] # convert 1/s to 1/hr and 2.016e-3 kg/mol -> kg/hr
+        },
+      },
+    },
+  },
   "Renewables Case": {
     "windpower":{
-        "Produces": 'electricity',
-      "Consumes": 'wind',
+      "Produces": 'electricity',
+      "Consumes": {},
       "Cashflows":{
         "Capacity":{
           "Expressions": 'windpower_capacity',
@@ -126,66 +186,6 @@ DISPATCHES_MODEL_COMPONENT_META={
       },
     },
   },
-  "Nuclear Case": {
-    "pem":{ # TODO: will require some transfer function
-      "Produces": 'hydrogen',
-      "Consumes": 'electricity',
-      "Cashflows":{
-        "Capacity":{
-          "Expressions": 'pem_capacity',
-        },
-        "Dispatch":{
-          "Expressions": ['fs.pem.electricity'],
-        },
-      },
-    },
-    "h2tank":{
-      "Stores": 'hydrogen',
-      "Consumes": {},
-      "Cashflows":{
-        "Capacity":{
-          "Expressions": 'h2_tank_capacity',
-          "Multiplier":  2.016e-3, # H2 Molar Mass = 2.016e-3 kg/mol
-        },
-      },
-    },
-    "h2turbine":{ # TODO: technically also consumes air, will need to revisit
-      "Produces": 'electricity',
-      "Consumes": 'hydrogen',
-      "Cashflows":{
-        "Capacity":{
-          "Expressions": 'h2_turbine_capacity',
-        },
-        "Dispatch":{
-          "Expressions": ['fs.h2_turbine.turbine.work_mechanical',
-            'fs.h2_turbine.compressor.work_mechanical'],
-          "Multiplier":  [-1, -1] # extra multiplier to ensure correct sign
-        },
-      },
-    },
-    "electricity_market":{
-      "Demands":  'electricity',
-      "Consumes": {},
-      "Cashflows":{
-        "Dispatch":{
-          "Expressions": ['fs.np_power_split.np_to_grid_port.electricity',
-            'fs.h2_turbine.turbine.work_mechanical',
-            'fs.h2_turbine.compressor.work_mechanical'],
-          "Multiplier":  [1e-3, -1e-6, -1e-6] # NOTE: h2 turbine is in W, convert to kW
-        },
-      },
-    },
-    "h2_market":{
-      "Demands":  'hydrogen',
-      "Consumes": {},
-      "Cashflows":{
-        "Dispatch":{
-          "Expressions": ['fs.h2_tank.outlet_to_pipeline.flow_mol'],
-          "Multiplier":  [7.2576] # convert 1/s to 1/hr and 2.016e-3 kg/mol -> kg/hr
-        },
-      },
-    },
-  },
 }
 
 class HERD(MOPED):
@@ -207,8 +207,8 @@ class HERD(MOPED):
     # extra parameters for HERD
     self._dmdl = None # Pyomo model specific to DISPATCHES (different from _m)
     self._dispatches_model_name = ''
-    self._dispatches_model_template = None # Template of DISPATCHES Model for HERON comparison
-    self._dispatches_model_comp_names = None # keys of the dispatches_model_template
+    self._dispatches_case_dict = None # Template of DISPATCHES Model for HERON comparison
+    self._dispatches_model_comp_names = None # keys of the dispatches_case_dict
     self._time_index_map = ['years', 'days', 'hours'] # index map to save time sets to dict later
     self._metrics = []     # TEAL metrics, summed expressions
     self._results = None   # results from Dispatch solve
@@ -618,69 +618,156 @@ class HERD(MOPED):
   # ===========================
   # DISPATCHES COMPATIBILITY
   # ===========================
+
+  def _resolve_incompatible_sets(self, incompatible_set, exceptions):
+    """
+      Quick helper method to remove exceptions from set of incompatible entries
+      NOTE: There might be a more elegant way of doing this...
+      @ In, incompatible_set, set, lists all components that are incompatible with other set
+      @ In, exceptions, list, allowable exceptions to incompatible list
+      @ Out, incompatible_set, set, lists all components that are incompatible with other set
+    """
+    compatible_set = []
+    for inc in incompatible_set: # loop over leftover HERON components
+      for exc in exceptions: # loop over acceptable list of leftovers
+        if exc in inc:
+          compatible_set.append(inc)
+    # update set of leftover HERON components
+    incompatible_set -= set(compatible_set)
+    return incompatible_set
+
   def _check_dispatches_compatibility(self):
     """
       Checks HERON components to match compatibility with available DISPATCHES flowsheets.
       @ In, None
       @ Out, None
     """
-    # TODO: check for financial params/inputs?
-    heron_comp_list = list( self._component_meta.keys() ) # current list of HERON components
-    self.raiseADebug('|Checking compatibility between HERON and available DISPATCHES cases|')
+    self.raiseADebug('|Checking compatibility between HERON and available DISPATCHES cases...|')
+
+    # current list of HERON components
+    heron_comp_list = list( self._component_meta.keys() )
+
+    # acceptable extra HERON components
+    #   (NPP not technically a unit model in DISPATCHES)
+    #   HERON sometimes takes in extra supply of resources (e.g., 'import_electricity')
+    acceptable_hComp_diffs = ['npp', 'import_']
+    # acceptable extra DISPATCHES component actions
+    acceptable_dComp_action_diffs = ['Cashflows']
+    acceptable_hComp_action_diffs = ['OptBounds', 'Dispatch', 'FixedValue',
+                                     'SyntheticHistory', 'StaticHistory']
 
     # check that HERON input file contains all components needed to run DISPATCHES case
     # using naming convention: d___ corresponds to DISPATCHES, h___ corresponds to HERON
-    dispatches_model_template = copy.deepcopy(DISPATCHES_MODEL_COMPONENT_META)
-    for dName, dModel in dispatches_model_template.items():
-      dispatches_comp_list    = list( dModel.keys() )
-      incompatible_components = [dComp not in heron_comp_list for dComp in dispatches_comp_list]
+    accepted_dispatches_case_name = None
 
-      # 1. first check: do component names match? NOTE: shouldn't really care, just easier to check
-      if sum(incompatible_components) > 0:
-        # print list of components missing from HERON input
-        missing_comps = list(compress(dispatches_comp_list, incompatible_components))
-        message  = f'HERON components do not match DISPATCHES Model: {dName}\n'
-        message +=  'Components missing from HERON XML input file: '
-        message += ', '.join(missing_comps)
-        raise IOError(message)
+    for dCaseName, dCase in DISPATCHES_MODEL_COMPONENT_META.items():
+      # ===========================================================
+      # 1. get component lists for DISPATCHES and HERON components
+      # ===========================================================
+      dispatches_comp_list = list( dCase.keys() )
+      # difference between component sets
+      incompatible_hComps = set(heron_comp_list) - set(dispatches_comp_list)
+      missing_dComps      = set(dispatches_comp_list) - set(heron_comp_list)
 
-      # now let's check individual component actions
+      # ====================================
+      ## 1a. check leftover HERON components NOT in DISPATCHES list ##
+      incompatible_hComps = self._resolve_incompatible_sets(incompatible_hComps, acceptable_hComp_diffs)
+      # if any remaining incompatible hComps, move on to next Case
+      if len(incompatible_hComps) > 0:
+        incompatible_hComp_message = f'||DISPATCHES: {dCaseName} - '\
+                                   + f'Extra HERON components:{incompatible_hComps}||'
+        self.raiseADebug(incompatible_hComp_message)
+        continue
+
+      # ====================================
+      ## 1b. check leftover DISPATCHES components NOT in HERON input list ##
+      # if any missing components from HERON inputs, move on to next Case
+      if len(missing_dComps) > 0:
+        missing_dComp_message = f'||DISPATCHES: {dCaseName} - '\
+                              + f'missing HERON components:{missing_dComps}||'
+        self.raiseADebug(missing_dComp_message)
+        continue
+
+      # =========================================
+      # 2. check individual component actions
+      # =========================================
+      skip_to_next_case = False
       for dComp in dispatches_comp_list:
-        hCompDict = self._component_meta[dComp]  # HERON component dict, same name as DISPATCHES
-        #TODO: temp fix to not check for Cashflows just yet
-        if 'Cashflows' in dModel[dComp].keys():
-          del dModel[dComp]['Cashflows']
-        dispatches_actions_list = list(dModel[dComp].keys())
-        incompatible_actions = [dAction not in hCompDict.keys()
-                                      for dAction in dispatches_actions_list]
+        # component dictionary listing actions/resources
+        dComp_actions_dict = dCase[dComp]
+        dComp_actions_list = list(dComp_actions_dict.keys())
+        hComp_actions_dict = self._component_meta[dComp]
+        hComp_actions_list = list(hComp_actions_dict.keys())
 
-        # 2. second check: do the components have the necessary actions?
-        if sum(incompatible_actions) > 0:
-          missing_actions = list(compress(dispatches_actions_list, incompatible_actions))
-          message = f'HERON Component {dComp} is missing the follow attributes: '
-          message += ', '.join(missing_actions)
-          raise IOError(message)
+        # difference between component sets
+        incompatible_hActions = set(hComp_actions_list) - set(dComp_actions_list)
+        missing_dActions      = set(dComp_actions_list) - set(hComp_actions_list)
 
+        # ====================================
+        ## 2a. check leftover HERON component actions NOT in DISPATCHES list ##
+        incompatible_hActions = self._resolve_incompatible_sets(incompatible_hActions,
+                                                                acceptable_hComp_action_diffs)
+
+        # if any remaining incompatible hComps, move on to next Case
+        if len(incompatible_hActions) > 0:
+          incompatible_hActions_message = f'|||DISPATCHES {dCaseName} - Comp {dComp} : '\
+                                        + f'Extra HERON actions:{incompatible_hActions}|||'
+          self.raiseADebug(incompatible_hActions_message)
+          skip_to_next_case = True
+          break
+
+        # ====================================
+        ## 2b. check leftover DISPATCHES component actions NOT in HERON list ##
+        missing_dActions = self._resolve_incompatible_sets(missing_dActions,
+                                                           acceptable_dComp_action_diffs)
+
+        # if any missing components from HERON inputs, move on to next Case
+        if len(missing_dActions) > 0:
+          missing_dActions_message = f'|||DISPATCHES {dCaseName} - Comp {dComp} : '\
+                                   + f'missing HERON actions:{missing_dActions}|||'
+          self.raiseADebug(missing_dActions_message)
+          skip_to_next_case = True
+          break
+
+        # ==================
         # 3. third check: do the HERON component resources match the DISPATCHES ones?
-        mismatched_actions = []
-        for dAction, dResource in dModel[dComp].items():
-          hAction = hCompDict[dAction]  # HERON component's action, might be a dict or str
-          if isinstance(hAction, dict):
-            hResource = list(hAction.keys())[0] if hAction else {}
-            mismatched_actions.append(hResource != dResource)
-          else:
-            mismatched_actions.append(hAction != dResource)
+        mismatched_resource_actions = []
+        for dAction, dResource in dComp_actions_dict.items():
 
-        if sum(mismatched_actions) > 0:
-          message = f'Attributes of HERON Component {dComp} do not match DISPATCHES case: '
-          message += ', '.join( list(compress(dispatches_actions_list, mismatched_actions)) )
-          raise IOError(message)
+          # first check that current action isnt one of the allowable exceptions
+          if dAction in acceptable_dComp_action_diffs:
+            mismatched_resource_actions.append(False)
+            continue
+
+          # pull entry from action dictionary
+          hResource = hComp_actions_dict[dAction]  # HERON component's action, might be a dict or str
+          if isinstance(hResource, dict):
+            hResource = list(hResource.keys())[0] if hResource else {}
+            mismatched_resource_actions.append(hResource != dResource)
+          else:
+            # check if HERON resource matches DISPATCHES resource for same action
+            mismatched_resource_actions.append(hResource != dResource)
+
+        if sum(mismatched_resource_actions) > 0:
+          action_message = f'|||Attributes of HERON Component {dComp} '\
+                         + 'do not match DISPATCHES case: ' \
+                         + ', '.join( list(compress(dComp_actions_list,
+                                                    mismatched_resource_actions)) )
+          self.raiseADebug(action_message)
+          skip_to_next_case = True
+          break
+
+      if skip_to_next_case:
+        break
+      accepted_dispatches_case_name = dCaseName
       break
 
-    self.raiseADebug(f'|HERON Case is compatible with {dName} DISPATCHES Model|')
-    self._dispatches_model_name = dName
-    self._dispatches_model_template = DISPATCHES_MODEL_COMPONENT_META[dName] # NOTE: NOT using copy
-    self._dispatches_model_comp_names = list(self._dispatches_model_template.keys())
+    self.raiseADebug(f'|DISPATCHES: {accepted_dispatches_case_name} is '\
+                     + 'a match for given HERON Components|')
+
+    self._dispatches_case_dict  = DISPATCHES_MODEL_COMPONENT_META[accepted_dispatches_case_name]
+    self._dispatches_model_name = accepted_dispatches_case_name
+    self._dispatches_model_comp_names = list(self._dispatches_case_dict.keys())
 
   # ==============
   # BUILD MODEL
@@ -1061,7 +1148,7 @@ class HERD(MOPED):
         # getting capacity Pyomo object if capex_driver is not defined
         if capex_driver is None:
           capex_driver, mult = self._get_capacity_from_dispatches_model(scenario,
-                                              self._dispatches_model_template[hComp.name])
+                                              self._dispatches_case_dict[hComp.name])
           # mult defaults to 1
           value *= mult
         # generate TEAL capex cashflow
@@ -1085,7 +1172,7 @@ class HERD(MOPED):
         if yearly_driver is None:
           # assuming that yearly fixed OM is based on capacity
           yearly_driver, mult = self._get_capacity_from_dispatches_model(scenario,
-                                              self._dispatches_model_template[hComp.name])
+                                              self._dispatches_case_dict[hComp.name])
 
         yearly = self.createRecurringYearly(tComp, value, yearly_driver, yearly_params)
         CF_collection.append(yearly)
@@ -1099,7 +1186,7 @@ class HERD(MOPED):
         if dispatch_driver is None:
           # these should return nested lists
           dispatch_driver = self._get_dispatch_from_dispatches_model(scenario, hComp,
-                                        self._dispatches_model_template[hComp.name])
+                                        self._dispatches_case_dict[hComp.name])
         # check for alpha as a time series
         if isinstance(value, dict):
           value = self.reshapeAlpha(value)
