@@ -233,7 +233,7 @@ class HERD(MOPED):
       @ Out, None
     """
     self._test_synth_years = [2022, ]
-    self._test_proj_life = 5
+    self._test_proj_life = 1
     # range of years through intended project life (_test_synth_years contained within this set)
     #   year[0]-1 is the construction year
     self._test_project_year_range =  np.arange(self._test_synth_years[0],
@@ -621,7 +621,7 @@ class HERD(MOPED):
 
   def _resolve_incompatible_sets(self, incompatible_set, exceptions):
     """
-      Quick helper method to remove exceptions from set of incompatible entries
+      Helper method to remove exceptions from set of incompatible entries
       NOTE: There might be a more elegant way of doing this...
       @ In, incompatible_set, set, lists all components that are incompatible with other set
       @ In, exceptions, list, allowable exceptions to incompatible list
@@ -636,7 +636,43 @@ class HERD(MOPED):
     incompatible_set -= set(compatible_set)
     return incompatible_set
 
-  def _check_dispatches_compatibility(self):
+  def _match_components(self, case_name, h_comps, d_comps, h_exceptions, d_exceptions):
+    """
+      Method to compare HERON component/action lists with DISPATCHES lists, determine compatibility
+      @ In, case_name, str, name of DISPATCHES case study/model being tested
+      @ In, h_comps, list, HERON component names
+      @ In, d_comps, list, DISPATCHES component names for given case
+      @ In, h_exceptions, list, HERON components that are allowable exceptions to DISPATCHES match
+      @ In, d_exceptions, list, DISPATCHES components that are allowable exceptions to HERON match
+      @ Out, components_match, bool, do the HERON and DISPATCHES component lists match?
+    """
+    components_match = False
+    incompatible_heron_comps = set(h_comps) - set(d_comps)
+    missing_dispatches_comps = set(d_comps) - set(h_comps)
+
+    # check leftover HERON components NOT in DISPATCHES list
+    if h_exceptions is not None:
+      incompatible_heron_comps = self._resolve_incompatible_sets(incompatible_heron_comps, h_exceptions)
+    # if any remaining incompatible hComps, move on to next Case
+    if len(incompatible_heron_comps) > 0:
+      incompatible_hComp_message = f'||DISPATCHES: {case_name} - '\
+                                  + f'Extra HERON components:{incompatible_heron_comps}||'
+      components_match = True
+      self.raiseADebug(incompatible_hComp_message)
+
+    # check leftover DISPATCHES components NOT in HERON input list
+    if d_exceptions is not None:
+      missing_dispatches_comps = self._resolve_incompatible_sets(missing_dispatches_comps, d_exceptions)
+    # if any missing components from HERON inputs, move on to next Case
+    if len(missing_dispatches_comps) > 0:
+      missing_dComp_message = f'||DISPATCHES: {case_name} - '\
+                            + f'missing HERON components:{missing_dispatches_comps}||'
+      components_match = True
+      self.raiseADebug(missing_dComp_message)
+
+    return components_match
+
+  def _check_dispatches_case_study_compatibility(self):
     """
       Checks HERON components to match compatibility with available DISPATCHES flowsheets.
       @ In, None
@@ -646,93 +682,54 @@ class HERD(MOPED):
 
     # current list of HERON components
     heron_comp_list = list( self._component_meta.keys() )
-
+    accepted_dispatches_case_name = None
     # acceptable extra HERON components
     #   (NPP not technically a unit model in DISPATCHES)
     #   HERON sometimes takes in extra supply of resources (e.g., 'import_electricity')
     acceptable_hComp_diffs = ['npp', 'import_']
     # acceptable extra DISPATCHES component actions
+    acceptable_hComp_action_diffs = ['OptBounds', 'Dispatch', 'FixedValue', 'SyntheticHistory', 'StaticHistory']
     acceptable_dComp_action_diffs = ['Cashflows']
-    acceptable_hComp_action_diffs = ['OptBounds', 'Dispatch', 'FixedValue',
-                                     'SyntheticHistory', 'StaticHistory']
 
     # check that HERON input file contains all components needed to run DISPATCHES case
     # using naming convention: d___ corresponds to DISPATCHES, h___ corresponds to HERON
-    accepted_dispatches_case_name = None
-
     for dCaseName, dCase in DISPATCHES_MODEL_COMPONENT_META.items():
       # ===========================================================
       # 1. get component lists for DISPATCHES and HERON components
       # ===========================================================
       dispatches_comp_list = list( dCase.keys() )
       # difference between component sets
-      incompatible_hComps = set(heron_comp_list) - set(dispatches_comp_list)
-      missing_dComps      = set(dispatches_comp_list) - set(heron_comp_list)
-
-      # ====================================
-      ## 1a. check leftover HERON components NOT in DISPATCHES list ##
-      incompatible_hComps = self._resolve_incompatible_sets(incompatible_hComps, acceptable_hComp_diffs)
-      # if any remaining incompatible hComps, move on to next Case
-      if len(incompatible_hComps) > 0:
-        incompatible_hComp_message = f'||DISPATCHES: {dCaseName} - '\
-                                   + f'Extra HERON components:{incompatible_hComps}||'
-        self.raiseADebug(incompatible_hComp_message)
+      components_match = self._match_components(case_name=dCaseName,
+                                          h_comps=heron_comp_list,
+                                          d_comps=dispatches_comp_list,
+                                          h_exceptions=acceptable_hComp_diffs,
+                                          d_exceptions=None)
+      if not components_match:
         continue
 
-      # ====================================
-      ## 1b. check leftover DISPATCHES components NOT in HERON input list ##
-      # if any missing components from HERON inputs, move on to next Case
-      if len(missing_dComps) > 0:
-        missing_dComp_message = f'||DISPATCHES: {dCaseName} - '\
-                              + f'missing HERON components:{missing_dComps}||'
-        self.raiseADebug(missing_dComp_message)
-        continue
-
-      # =========================================
-      # 2. check individual component actions
-      # =========================================
-      skip_to_next_case = False
       for dComp in dispatches_comp_list:
-        # component dictionary listing actions/resources
+        # =========================================
+        # 2. check individual component actions
+        # =========================================
         dComp_actions_dict = dCase[dComp]
         dComp_actions_list = list(dComp_actions_dict.keys())
         hComp_actions_dict = self._component_meta[dComp]
         hComp_actions_list = list(hComp_actions_dict.keys())
 
         # difference between component sets
-        incompatible_hActions = set(hComp_actions_list) - set(dComp_actions_list)
-        missing_dActions      = set(dComp_actions_list) - set(hComp_actions_list)
-
-        # ====================================
-        ## 2a. check leftover HERON component actions NOT in DISPATCHES list ##
-        incompatible_hActions = self._resolve_incompatible_sets(incompatible_hActions,
-                                                                acceptable_hComp_action_diffs)
-
-        # if any remaining incompatible hComps, move on to next Case
-        if len(incompatible_hActions) > 0:
-          incompatible_hActions_message = f'|||DISPATCHES {dCaseName} - Comp {dComp} : '\
-                                        + f'Extra HERON actions:{incompatible_hActions}|||'
-          self.raiseADebug(incompatible_hActions_message)
-          skip_to_next_case = True
+        components_match = self._match_components(case_name=f'{dCaseName} - {dComp}',
+                                            h_comps=hComp_actions_list,
+                                            d_comps=dComp_actions_list,
+                                            h_exceptions=acceptable_hComp_action_diffs,
+                                            d_exceptions=acceptable_dComp_action_diffs)
+        if not components_match:
           break
 
-        # ====================================
-        ## 2b. check leftover DISPATCHES component actions NOT in HERON list ##
-        missing_dActions = self._resolve_incompatible_sets(missing_dActions,
-                                                           acceptable_dComp_action_diffs)
-
-        # if any missing components from HERON inputs, move on to next Case
-        if len(missing_dActions) > 0:
-          missing_dActions_message = f'|||DISPATCHES {dCaseName} - Comp {dComp} : '\
-                                   + f'missing HERON actions:{missing_dActions}|||'
-          self.raiseADebug(missing_dActions_message)
-          skip_to_next_case = True
-          break
-
-        # ==================
-        # 3. third check: do the HERON component resources match the DISPATCHES ones?
         mismatched_resource_actions = []
         for dAction, dResource in dComp_actions_dict.items():
+          # =========================================
+          # 3. check individual component resources
+          # =========================================
 
           # first check that current action isnt one of the allowable exceptions
           if dAction in acceptable_dComp_action_diffs:
@@ -749,15 +746,14 @@ class HERD(MOPED):
             mismatched_resource_actions.append(hResource != dResource)
 
         if sum(mismatched_resource_actions) > 0:
+          action_str = ', '.join( list(compress(dComp_actions_list, mismatched_resource_actions)) )
           action_message = f'|||Attributes of HERON Component {dComp} '\
-                         + 'do not match DISPATCHES case: ' \
-                         + ', '.join( list(compress(dComp_actions_list,
-                                                    mismatched_resource_actions)) )
+                         + 'do not match DISPATCHES case: ' +  action_str
           self.raiseADebug(action_message)
-          skip_to_next_case = True
+          components_match = False
           break
 
-      if skip_to_next_case:
+      if not components_match:
         break
       accepted_dispatches_case_name = dCaseName
       break
@@ -876,24 +872,39 @@ class HERD(MOPED):
     """
     multiperiod_options = {}
 
-    data_sources = self._sources
-    available_func_sources = [src for src in data_sources if getattr(src,'_type') == 'Function']
-    func_sources = [func for func in available_func_sources if func.name == 'input-params']
+    if "Nuclear" in self._dispatches_model_name:
+      # TODO: these should be populated from a mix of XML input and External function
+      multiperiod_options['flowsheet_options'] = {"np_capacity": 1000}
+      multiperiod_options['initialization_options'] = {
+                                  "split_frac_grid": 0.8,
+                                  "tank_holdup_previous": 0,
+                                  "flow_mol_to_pipeline": 10,
+                                  "flow_mol_to_turbine": 10,
+                                }
+      multiperiod_options['unfix_dof_options'] = {}
+      multiperiod_options['staging_params'] = {}
 
-    if len(available_func_sources) > 0 and len(func_sources) > 0:
-      func_source  = func_sources[0]
-      methods      = getattr(func_source, '_module_methods')
-      extra_params = methods['load_parameters'](self._time_sets)
+    elif "Renewables" in self._dispatches_model_name:
+      # check if additional params need to be loaded from external function
+      available_functions = [src for src in self._sources if getattr(src,'_type') == 'Function']
+      func_sources = [func for func in available_functions if func.name == 'input-params']
 
-    multiperiod_options['flowsheet_options'] = {"np_capacity": 1000}
-    multiperiod_options['initialization_options'] = {
-                                "split_frac_grid": 0.8,
-                                "tank_holdup_previous": 0,
-                                "flow_mol_to_pipeline": 10,
-                                "flow_mol_to_turbine": 10,
-                              }
-    multiperiod_options['unfix_dof_options'] = {}
-    multiperiod_options['staging_params'] = {}
+      # if external function for extra input parameters is found...
+      if len(available_functions) + len(func_sources) > 0:
+
+        if 'StaticHistory' in self._component_meta['windpower']:
+          wind_data = self._component_meta['windpower']['StaticHistory']['signals']
+
+        methods      = getattr(func_sources[0], '_module_methods')
+        extra_params = methods['load_parameters'](self._time_sets, wind_data)
+
+      multiperiod_options['flowsheet_options'] = {}
+      multiperiod_options['initialization_options'] = {}
+      multiperiod_options['unfix_dof_options'] = {}
+      multiperiod_options['staging_params'] = {}
+
+    else:
+      raise IOError("Unexpected DISPATCHES model name.")
 
     return multiperiod_options
 
@@ -1386,7 +1397,7 @@ class HERD(MOPED):
     self.collectResources()   # MOPED method (TODO: needed?)
 
     # new workflow for DISPATCHES
-    self._check_dispatches_compatibility()
+    self._check_dispatches_case_study_compatibility()
     self._get_demand_data()
 
     # building the Pyomo model using DISPATCHES
