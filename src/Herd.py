@@ -646,7 +646,7 @@ class HERD(MOPED):
       @ In, d_exceptions, list, DISPATCHES components that are allowable exceptions to HERON match
       @ Out, components_match, bool, do the HERON and DISPATCHES component lists match?
     """
-    components_match = False
+    components_match = True
     incompatible_heron_comps = set(h_comps) - set(d_comps)
     missing_dispatches_comps = set(d_comps) - set(h_comps)
 
@@ -657,7 +657,7 @@ class HERD(MOPED):
     if len(incompatible_heron_comps) > 0:
       incompatible_hComp_message = f'||DISPATCHES: {case_name} - '\
                                   + f'Extra HERON components:{incompatible_heron_comps}||'
-      components_match = True
+      components_match = False
       self.raiseADebug(incompatible_hComp_message)
 
     # check leftover DISPATCHES components NOT in HERON input list
@@ -667,7 +667,7 @@ class HERD(MOPED):
     if len(missing_dispatches_comps) > 0:
       missing_dComp_message = f'||DISPATCHES: {case_name} - '\
                             + f'missing HERON components:{missing_dispatches_comps}||'
-      components_match = True
+      components_match = False
       self.raiseADebug(missing_dComp_message)
 
     return components_match
@@ -892,16 +892,23 @@ class HERD(MOPED):
       # if external function for extra input parameters is found...
       if len(available_functions) + len(func_sources) > 0:
 
-        if 'StaticHistory' in self._component_meta['windpower']:
-          wind_data = self._component_meta['windpower']['StaticHistory']['signals']
+        wind_keyword  = set(self._synth_histories.keys()).intersection(['WIND', 'Wind', 'wind'])
+        wind_data = None
+        if len(wind_keyword) > 0:
+          wind_data = self._synth_histories[wind_keyword.pop()]['signals']
+
+        price_keyword = set(self._synth_histories.keys()).intersection(['PRICE', 'Price', 'price'])
+        price_data = None
+        if len(price_keyword) > 0:
+          price_data = self._synth_histories[price_keyword.pop()]['signals']
 
         methods      = getattr(func_sources[0], '_module_methods')
-        extra_params = methods['load_parameters'](self._time_sets, wind_data)
+        extra_params = methods['load_parameters'](self._time_sets, wind_data, price_data)
 
       multiperiod_options['flowsheet_options'] = {}
       multiperiod_options['initialization_options'] = {}
       multiperiod_options['unfix_dof_options'] = {}
-      multiperiod_options['staging_params'] = {}
+      multiperiod_options['staging_params'] = extra_params
 
     else:
       raise IOError("Unexpected DISPATCHES model name.")
