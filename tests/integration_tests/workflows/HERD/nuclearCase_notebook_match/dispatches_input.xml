@@ -24,7 +24,7 @@
       <num_steps>24</num_steps>
     </time_discretization>
     <economics>
-      <ProjectTime>3</ProjectTime>
+      <ProjectTime>20</ProjectTime>
       <DiscountRate>0.08</DiscountRate>
       <tax>0.2</tax>
       <inflation>0.02184</inflation>
@@ -270,6 +270,7 @@
   <DataGenerators>
     <!-- to trigger the use of the JSON LMP signal, name needs to be 'dispatches-test'-->
     <CSV name='dispatches-test' variable="Signal">%BASE_WORKING_DIR%/../LMP_Static.csv</CSV>
+    <Function name="input-params">extra_input_parameters.py</Function>
   </DataGenerators>
 
 </HERON>

@@ -202,7 +202,7 @@ class HERD(MOPED):
 
   def __init__(self):
     """
-      Initializing HERD class by calling parent class init.
+      Initializing HERD class by calling parent class init and adding new attributes.
       @ In, None
       @ Out, None
     """
@@ -215,6 +215,7 @@ class HERD(MOPED):
     self._dispatches_case_dict = None # Template of DISPATCHES Model for HERON comparison
     self._dispatches_model_comp_names = None # keys of the dispatches_case_dict
     self._time_index_map = ['years', 'days', 'hours'] # index map to save time sets to dict later
+    self._projectTime = 0
     self._metrics = []     # TEAL metrics, summed expressions
     self._results = None   # results from Dispatch solve
     self._num_samples = 0  # number of samples/scenarios/realizations for easier retrievability
@@ -222,52 +223,73 @@ class HERD(MOPED):
     self._synth_histories = {}  # nested dict of all generated synthetic histories
     self._time_sets = {}
     self._multiperiod_options = {}
+    self._external_func = None
 
     # Testing - using LMP signals from JSON script as used in example Jupyter notebook
     #    intended years to test out (2022-2031, use same data. 2032-2041, use same data)
     self._test_mode = False
-    self._test_synth_years = []  # the actual years to test out, [2022, 2032]
-    self._test_proj_life = 0     # intended length of project, regardless of synth_years
-    self._test_project_year_range = [] # actual years of project [2022, 2023, 2024, ...]
-    self._test_map_synth_to_proj = [] # map from synth to actual years [2022, 2022, ..., 2032, ...]
+    self._test_years = [2022, ] # the actual years to test out, [2022, 2032]
+    self._test_set_years = [] # actual years of project [2022, 2023, 2024, ...]
+    self._test_years_map = [] # map from synth to actual years [2022, 2022, ..., 2032, ...]
 
-  def _set_test_time_sets(self):
+  # ===================
+  # COLLECT METADATA
+  # ===================
+  def buildGlobalSettings(self):
+    """
+      Builds global settings needed elsewhere in HERD
+      @ In, verbosity, int or string, verbosity settings for TEAL
+      @ Out, None
+    """
+    # get project life for simulation
+    self._projectTime = int(self._case._global_econ['ProjectTime'])
+
+    # check if external functions have been passed in through XML, used to load extraneous params
+    external_functions  = [src for src in self._sources if getattr(src,'_type') == 'Function']
+    self._external_func = [func for func in external_functions if func.name == 'input-params']
+
+    # if running a DISPATCHES test, testing against case study notebook results w/ notebook data
+    #    - running an abridged simulation:
+    #        * if project time is 20 yrs, only create variables for discrete sets of years
+    #        * e.g., 1 set of variables for 10 years, another set of variables for the next 10
+    #    - loading synthetic history data from static csv files or other methods
+    #    - TODO: is this abridged variable creature a feature of interest apart from testing?
+    dispatches_test_sources = [source.name == 'dispatches-test' for source in self._sources]
+    # check if any of the synthetic history sources request a dispatches-test
+    if np.any(dispatches_test_sources):
+      self._test_mode = True
+      self._override_test_time_sets()
+      # testing for 20 year project life, override because it doesnt match LMP JSON signal
+      globalEcon = getattr(self._case,"_global_econ")
+      globalEcon["ProjectTime"] = self._projectTime # some funky pointer stuff here
+
+    self._num_samples = getattr(self._case,"_num_samples")
+
+  def _override_test_time_sets(self):
     """
       Sets object attributes for time sets specifically for JSON test.
       @ In, None
       @ Out, None
     """
-    self._test_synth_years = [2022, ]
-    self._test_proj_life = 1
-    # range of years through intended project life (_test_synth_years contained within this set)
-    #   year[0]-1 is the construction year
-    self._test_project_year_range =  np.arange(self._test_synth_years[0],
-                                            self._test_synth_years[0] + self._test_proj_life)
-    # array map, same length as project year range but with entries in _test_synth_years
-    test_synth_years = self._test_synth_years
-    self._test_map_synth_to_proj = np.array([test_synth_years[sum(y>=test_synth_years) - 1]
-                                            for y in self._test_project_year_range])
+    projectTime = self._projectTime
 
-  # ===================
-  # COLLECT METADATA
-  # ===================
-  def buildEconSettings(self, verbosity=0):
-    """
-      Builds TEAL economic settings for running cashflows
-      @ In, verbosity, int or string, verbosity settings for TEAL
-      @ Out, None
-    """
-    # checking for a specific case - testing the DISPATCHES base Nuclear Case
-    if np.any([source.name == 'dispatches-test' for source in self._sources]):
-      self._test_mode = True
-      self._set_test_time_sets()
-      # testing for 20 year project life, override because it doesnt match LMP JSON signal
-      globalEcon = getattr(self._case,"_global_econ")
-      globalEcon["ProjectTime"] = self._test_proj_life # some funky pointer stuff here
+    if len(self._external_func) > 0:
+      methods     = getattr(self._external_func[0], '_module_methods')
+      time_params = methods['load_time_set_parameters'](projectTime)
+      self._test_years = time_params['years']
+      test_project_year_range = [ [y]*n for y,n in zip(time_params['years'],
+                                                       time_params['n_years_per_set'])]
+      self._test_set_years = np.array(test_project_year_range).flatten()
+    else:
+      self._test_set_years = self._test_years * projectTime
 
-    # now run parent method
-    super().buildEconSettings(verbosity)
-    self._num_samples = getattr(self._case,"_num_samples")
+    # range of years through intended project life (_test_years contained within this set)
+    # NOTE: year[0]-1 is the construction year
+    test_years = self._test_years
+    self._test_set_years = np.arange(test_years[0], test_years[0] + projectTime)
+    # array map, same length as project year range but with entries in _test_years
+    self._test_years_map = np.array([test_years[sum(y>=test_years) - 1]
+                                            for y in self._test_set_years])
 
   def buildComponentMeta(self):
     """
@@ -399,8 +421,8 @@ class HERD(MOPED):
 
     synth_years, synth_days, synth_hours = [synthetic_data[ind] for ind in self._time_index_map]
     synth_scenarios  = range(self._num_samples)
-    proj_years_range = self._test_project_year_range
-    map_synth2proj   = self._test_map_synth_to_proj
+    proj_years_range = self._test_set_years
+    map_synth2proj   = self._test_years_map
 
     # restructure the synthetic history dictionary to match DISPATCHES
     synth_histories = {}
@@ -420,9 +442,9 @@ class HERD(MOPED):
     # save set time data for use within DISPATCHES
     synth_histories["sets"] = {}
     synth_histories["sets"]["synth_scenarios"] = list(synth_scenarios) # DISPATCHES wants this as a list
-    synth_histories["sets"]["synth_years"]  = np.unique(synth_years) # DISPATCHES wants this as a list
-    synth_histories["sets"]["synth_days"]   = np.unique(synth_days)  # DISPATCHES wants this as a range
-    synth_histories["sets"]["synth_hours"]  = np.unique(synth_hours) # DISPATCHES wants this as a range
+    synth_histories["sets"]["synth_years"] = np.unique(synth_years) # DISPATCHES wants this as a list
+    synth_histories["sets"]["synth_days"]  = np.unique(synth_days)  # DISPATCHES wants this as a range
+    synth_histories["sets"]["synth_hours"] = np.unique(synth_hours) # DISPATCHES wants this as a range
     synth_histories["sets"]["map_synth2proj"] = map_synth2proj # used only for tests
     synth_histories["sets"]["proj_years_range"] = proj_years_range # used only for tests
     # getting weights_days - how many days does each cluster represent?
@@ -547,11 +569,11 @@ class HERD(MOPED):
 
     # data is the same for 2022-2031, and 2032-2041
     #   to save on # of variables, just duplicate LMP values
-    assert len(self._test_synth_years) <= self._test_proj_life
+    assert len(self._test_years) <= self._projectTime
 
     # building array of simulation years
-    years_range = self._test_project_year_range # actual year range for project [2022->2041]
-    years_map   = self._test_map_synth_to_proj # array => [2022, 2022, ...., 2032, 2032, ...]
+    years_range = self._test_set_years # actual year range for project [2022->2041]
+    years_map   = self._test_years_map # array => [2022, 2022, ...., 2032, 2032, ...]
 
     # calculating time set lengths from full CSV
     n_columns = len(data_frame.columns)
@@ -612,7 +634,7 @@ class HERD(MOPED):
 
     # save set time data for use within DISPATCHES
     synthetic_data["sets"]["synth_scenarios"] = list(set_scenarios) # DISPATCHES wants this as a list
-    synthetic_data["sets"]["synth_years"]  = self._test_synth_years # DISPATCHES wants this as a list
+    synthetic_data["sets"]["synth_years"]  = self._test_years # DISPATCHES wants this as a list
     synthetic_data["sets"]["synth_days"]   = set_days  # DISPATCHES wants this as a range
     synthetic_data["sets"]["synth_hours"]  = set_time # DISPATCHES wants this as a range
     synthetic_data["sets"]["map_synth2proj"]   = years_map # used only for tests
@@ -891,12 +913,8 @@ class HERD(MOPED):
       multiperiod_options['staging_params'] = {}
 
     elif "Renewables" in self._dispatches_model_name:
-      # check if additional params need to be loaded from external function
-      available_functions = [src for src in self._sources if getattr(src,'_type') == 'Function']
-      func_sources = [func for func in available_functions if func.name == 'input-params']
-
       # if external function for extra input parameters is found...
-      if len(available_functions) + len(func_sources) > 0:
+      if len(self._external_func) > 0:
 
         wind_keyword  = set(self._synth_histories.keys()).intersection(['WIND', 'Wind', 'wind'])
         wind_data = None
@@ -908,7 +926,7 @@ class HERD(MOPED):
         if len(price_keyword) > 0:
           price_data = self._synth_histories[price_keyword.pop()]['signals']
 
-        methods      = getattr(func_sources[0], '_module_methods')
+        methods      = getattr(self._external_func[0], '_module_methods')
         extra_params = methods['load_parameters'](self._time_sets, wind_data, price_data)
 
       multiperiod_options['flowsheet_options'] = {}
@@ -1427,6 +1445,7 @@ class HERD(MOPED):
     """
     time_start = time.time()
     # original workflow from MOPED
+    self.buildGlobalSettings()
     self.buildEconSettings()  # overloaded method
     self.buildComponentMeta() # overloaded method
     self.buildCashflowMeta()  # MOPED method
