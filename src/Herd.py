@@ -31,6 +31,11 @@ try:
   # Nuclear flowsheet function imports
   from dispatches.case_studies.nuclear_case.nuclear_flowsheet import (build_ne_flowsheet,
                                                                       fix_dof_and_initialize)
+  # Renewables flowsheet
+  from dispatches.case_studies.renewables_case.wind_battery_PEM_tank_turbine_LMP import \
+                                             (wind_battery_pem_tank_turb_mp_block,
+                                              wind_battery_pem_tank_turb_variable_pairs,
+                                              wind_battery_pem_tank_turb_periodic_variable_pairs)
   # Import function for the construction of the multiperiod model
   from idaes.apps.grid_integration import MultiPeriodModel
   from idaes.core.solvers import get_solver
@@ -783,15 +788,12 @@ class HERD(MOPED):
 
     # get extra arguments/options to pass into Multiperiod model for flowsheet
     self._multiperiod_options = self._get_multiperiod_flowsheet_options()
+    flowsheet_options = self._multiperiod_options['flowsheet_options']
     init_options      = self._multiperiod_options['initialization_options']
     unfix_dof_options = self._multiperiod_options['unfix_dof_options']
-
-    # wrapping fs options in a dict allow extraction downstream and keep staging_params intact
-    flowsheet_options = {'fs_options':self._multiperiod_options['flowsheet_options']}
-
-    # using partial to sneak in an extra dictionary input to the call
     staging_params = self._multiperiod_options['staging_params']
-    process_func   = partial(self.flowsheet_block, staging_params=staging_params)
+
+    function_links = self._get_process_functions_for_idaes(staging_params=staging_params)
 
     # NOTE: within the build process, a tmp JSON file is created in wdir...
     self._dmdl = MultiPeriodModel(
@@ -799,10 +801,11 @@ class HERD(MOPED):
                     set_days=set_days,
                     set_years=set_years,
                     set_scenarios=set_scenarios,
-                    process_model_func=process_func,
-                    initialization_func=fix_dof_and_initialize,
-                    unfix_dof_func=self.unfixDof,
-                    linking_variable_func=self._get_linking_variable_pairs,
+                    process_model_func=function_links['process_func'],
+                    initialization_func=function_links['fix_dof_func'],
+                    unfix_dof_func=function_links['unfix_dof_func'],
+                    linking_variable_func=function_links['link_var_pairs_func'],
+                    periodic_variable_func=function_links['periodic_var_pairs_func'],
                     flowsheet_options=flowsheet_options,
                     initialization_options=init_options,
                     unfix_dof_options=unfix_dof_options,
@@ -844,10 +847,10 @@ class HERD(MOPED):
     # NOTE: assuming here that we're not importing both static histories and synthetic histories
     #       therefore all time sets are presumably the same (generated through the same method)
     signal_name = list(self._synth_histories.keys())[0] # from our assumption, any signal will do
-    market_synthetic_history = self._synth_histories[signal_name]
+    a_synthetic_history = self._synth_histories[signal_name]
 
     # transferring information on Sets
-    sets = market_synthetic_history['sets']
+    sets = a_synthetic_history['sets']
     time_sets = {}
     time_sets['set_time']  = np.unique(sets['synth_hours'])
     time_sets['set_days']  = np.unique(sets['synth_days'])
@@ -858,7 +861,7 @@ class HERD(MOPED):
     time_sets['n_time_points'] = len(time_sets['set_time'])
 
     # transferring information on weightings
-    time_sets['weights_days'] = market_synthetic_history['weights_days']
+    time_sets['weights_days'] = a_synthetic_history['weights_days']
     # NOTE: equal probability for all scenarios
     time_sets['weights_scenarios'] = {s:1/self._num_samples for s in range(self._num_samples)}
     return time_sets
@@ -874,7 +877,10 @@ class HERD(MOPED):
 
     if "Nuclear" in self._dispatches_model_name:
       # TODO: these should be populated from a mix of XML input and External function
-      multiperiod_options['flowsheet_options'] = {"np_capacity": 1000}
+      # wrapping fs options in a dict allow extraction downstream and keep staging_params intact
+      multiperiod_options['flowsheet_options'] ={'fs_options':
+                                                    {"np_capacity": 1000}
+                                                }
       multiperiod_options['initialization_options'] = {
                                   "split_frac_grid": 0.8,
                                   "tank_holdup_previous": 0,
@@ -914,6 +920,29 @@ class HERD(MOPED):
       raise IOError("Unexpected DISPATCHES model name.")
 
     return multiperiod_options
+
+  def _get_process_functions_for_idaes(self, staging_params):
+
+    function_links = {}
+    if "Nuclear" in self._dispatches_model_name:
+      # using partial to sneak in an extra dictionary input to the call
+      function_links['process_func'] = partial(self.flowsheet_block, staging_params=staging_params)
+      function_links['fix_dof_func'] = fix_dof_and_initialize
+      function_links['unfix_dof_func'] = self.unfixDof
+      function_links['link_var_pairs_func']     = self._get_linking_variable_pairs
+      function_links['periodic_var_pairs_func'] = None
+
+    elif "Renewables" in self._dispatches_model_name:
+      function_links['process_func'] = partial(wind_battery_pem_tank_turb_mp_block,
+                                                input_params=staging_params, verbose=False)
+      function_links['fix_dof_func'] = None
+      function_links['unfix_dof_func'] = None
+      function_links['link_var_pairs_func'] = partial(wind_battery_pem_tank_turb_variable_pairs,
+                                                       tank_type=staging_params['tank_type'])
+      function_links['periodic_var_pairs_func'] = partial(
+                                                wind_battery_pem_tank_turb_periodic_variable_pairs,
+                                                tank_type=staging_params['tank_type'])
+    return function_links
 
   #==== METHODS CALLED THROUGH IDAES ====#
   def flowsheet_block(self, mdl, fs_options, staging_params):
