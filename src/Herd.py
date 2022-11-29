@@ -956,7 +956,7 @@ class HERD(MOPED):
                                 verbose=False)
       function_links['process_func'] = partial(self.flowsheet_block, staging_params=staging_params)
       function_links['fix_dof_func'] = None
-      function_links['unfix_dof_func'] = None
+      function_links['unfix_dof_func'] = self.unfixDof
       function_links['link_var_pairs_func'] = partial(wind_battery_pem_tank_turb_variable_pairs,
                                                        tank_type=staging_params['tank_type'])
       function_links['periodic_var_pairs_func'] = partial(
@@ -1028,38 +1028,43 @@ class HERD(MOPED):
       @In, kwargs, extra arguments for flowsheet parameters
       @ Out, None
     """
-    # Set defaults in case options are not passed to the function
-    options = kwargs.get("options", {})
-    air_h2_ratio = options.get("air_h2_ratio", 10.76)
+    if "Nuclear" in self._dispatches_model_name:
+      # Set defaults in case options are not passed to the function
+      options = kwargs.get("options", {})
+      air_h2_ratio = options.get("air_h2_ratio", 10.76)
 
-    # Unfix the electricity split in the electrical splitter
-    ps.fs.np_power_split.split_fraction["np_to_grid", 0].unfix()
+      # Unfix the electricity split in the electrical splitter
+      ps.fs.np_power_split.split_fraction["np_to_grid", 0].unfix()
 
-    # Unfix the holdup_previous and outflow variables
-    ps.fs.h2_tank.tank_holdup_previous.unfix()
-    ps.fs.h2_tank.outlet_to_turbine.flow_mol.unfix()
-    ps.fs.h2_tank.outlet_to_pipeline.flow_mol.unfix()
+      # Unfix the holdup_previous and outflow variables
+      ps.fs.h2_tank.tank_holdup_previous.unfix()
+      ps.fs.h2_tank.outlet_to_turbine.flow_mol.unfix()
+      ps.fs.h2_tank.outlet_to_pipeline.flow_mol.unfix()
 
-    # Unfix the flowrate of air to the mixer
-    ps.fs.mixer.air_feed.flow_mol.unfix()
+      # Unfix the flowrate of air to the mixer
+      ps.fs.mixer.air_feed.flow_mol.unfix()
 
-    # Add a constraint to maintain the air to hydrogen flow ratio
-    ps.fs.mixer.air_h2_ratio = pyo.Constraint(
-                expr=ps.fs.mixer.air_feed.flow_mol[int(0)] ==
-                      air_h2_ratio * ps.fs.mixer.hydrogen_feed.flow_mol[int(0)])
+      # Add a constraint to maintain the air to hydrogen flow ratio
+      ps.fs.mixer.air_h2_ratio = pyo.Constraint(
+                  expr=ps.fs.mixer.air_feed.flow_mol[int(0)] ==
+                        air_h2_ratio * ps.fs.mixer.hydrogen_feed.flow_mol[int(0)])
 
-    # Set bounds on variables. A small non-zero value is set as the lower
-    # bound on molar flowrates to avoid convergence issues
-    ps.fs.pem.outlet.flow_mol[0].setlb(0.001)
+      # Set bounds on variables. A small non-zero value is set as the lower
+      # bound on molar flowrates to avoid convergence issues
+      ps.fs.pem.outlet.flow_mol[0].setlb(0.001)
 
-    ps.fs.h2_tank.inlet.flow_mol[0].setlb(0.001)
-    ps.fs.h2_tank.outlet_to_turbine.flow_mol[0].setlb(0.001)
-    ps.fs.h2_tank.outlet_to_pipeline.flow_mol[0].setlb(0.001)
+      ps.fs.h2_tank.inlet.flow_mol[0].setlb(0.001)
+      ps.fs.h2_tank.outlet_to_turbine.flow_mol[0].setlb(0.001)
+      ps.fs.h2_tank.outlet_to_pipeline.flow_mol[0].setlb(0.001)
 
-    ps.fs.translator.inlet.flow_mol[0].setlb(0.001)
-    ps.fs.translator.outlet.flow_mol[0].setlb(0.001)
+      ps.fs.translator.inlet.flow_mol[0].setlb(0.001)
+      ps.fs.translator.outlet.flow_mol[0].setlb(0.001)
 
-    ps.fs.mixer.hydrogen_feed.flow_mol[0].setlb(0.001)
+      ps.fs.mixer.hydrogen_feed.flow_mol[0].setlb(0.001)
+
+    elif "Renewables" in self._dispatches_model_name:
+      #TODO: unfix tank length of H2 tank if tank type is detailed
+      ps.fs.battery.nameplate_power.unfix()
 
   def _get_linking_variable_pairs(self, mdl_start, mdl_end):
     """
@@ -1106,7 +1111,7 @@ class HERD(MOPED):
 
     elif "Renewables" in self._dispatches_model_name:
       # Declare first-stage variables (Design decisions)
-      mdl.wind_system_capacity = pyo.Var(domain=pyo.NonNegativeReals,
+      mdl.windpower_capacity = pyo.Var(domain=pyo.NonNegativeReals,
                                          initialize=input_params['wind_mw'] * 1e3,
                                          units=pyunits.kW,
                                          bounds=(0, input_params['wind_mw_ub'] * 1e3))
@@ -1131,7 +1136,7 @@ class HERD(MOPED):
     else:
       raise IOError("Unexpected DISPATCHES model name.")
 
-    for t in set_period:
+    for i,t in enumerate(set_period):
       if "Nuclear" in self._dispatches_model_name:
         # Ensure that the electricity to the PEM elctrolyzer does not exceed the PEM capacity
         mdl.pem_capacity_constraint.add(t,
@@ -1144,9 +1149,12 @@ class HERD(MOPED):
             -mdl.period[t].fs.h2_turbine.work_mechanical[0] <= mdl.h2_turbine_capacity)
 
       elif "Renewables" in self._dispatches_model_name:
+        # TODO: move this elsewhere?
+        if i==0:
+          mdl.period[t].fs.battery.initial_energy_throughput.fix(0)
         # Ensure that the electricity to the wind system does not exceed the wind capacity
         mdl.wind_capacity_constraint.add(t,
-            mdl.period[t].fs.windpower.system_capacity <= mdl.wind_system_capacity)
+            mdl.period[t].fs.windpower.system_capacity <= mdl.windpower_capacity)
         # Ensure that the electricity to the battery does not exceed the battery capacity
         mdl.battery_capacity_constraint.add(t,
             mdl.period[t].fs.battery.nameplate_power <= mdl.battery_capacity)
@@ -1173,19 +1181,20 @@ class HERD(MOPED):
       @ In, mdl, Pyomo scenario model
       @ Out, None
     """
-    set_time  = mdl.parent_block().set_time
-    set_days  = mdl.parent_block().set_days
-    set_years = mdl.parent_block().set_years
+    if "Nuclear" in self._dispatches_model_name:
+      set_time  = mdl.parent_block().set_time
+      set_days  = mdl.parent_block().set_days
+      set_years = mdl.parent_block().set_years
 
-    # Set initial holdup for each day (Assumed to be zero at the beginning of each day)
-    for y in set_years:
-      for d in set_days:
-        mdl.period[1, d, y].fs.h2_tank.tank_holdup_previous.fix(0)
+      # Set initial holdup for each day (Assumed to be zero at the beginning of each day)
+      for y in set_years:
+        for d in set_days:
+          mdl.period[1, d, y].fs.h2_tank.tank_holdup_previous.fix(0)
 
-    @mdl.Constraint(set_time, set_days, set_years)
-    def hydrogen_demand_constraint(blk, t, d, y):
-      return blk.period[t, d, y].fs.h2_tank.outlet_to_pipeline.flow_mol[0] \
-                <= self._demand_meta['h2_market']["Demand"] / 2.016e-3 # convert from kg to mol
+      @mdl.Constraint(set_time, set_days, set_years)
+      def hydrogen_demand_constraint(blk, t, d, y):
+        return blk.period[t, d, y].fs.h2_tank.outlet_to_pipeline.flow_mol[0] \
+                  <= self._demand_meta['h2_market']["Demand"] / 2.016e-3 # convert from kg to mol
 
   def _add_non_anticipativity_constraints(self):
     """
@@ -1202,39 +1211,55 @@ class HERD(MOPED):
     dmdl = self._dmdl
 
     # Add non-anticipativity constraints
-    dmdl.pem_capacity = pyo.Var(within=pyo.NonNegativeReals,
-                                doc="Design PEM capacity (in kW)")
-    dmdl.h2_tank_capacity = pyo.Var(within=pyo.NonNegativeReals,
-                                 doc="Design tank capacity (in mol)")
-    dmdl.h2_turbine_capacity = pyo.Var(within=pyo.NonNegativeReals,
+    if "Nuclear" in self._dispatches_model_name:
+      dmdl.pem_capacity = pyo.Var(within=pyo.NonNegativeReals,
+                                  doc="Design PEM capacity (in kW)")
+      dmdl.h2_tank_capacity = pyo.Var(within=pyo.NonNegativeReals,
+                                  doc="Design tank capacity (in mol)")
+      dmdl.h2_turbine_capacity = pyo.Var(within=pyo.NonNegativeReals,
                                        doc="Design turbine capacity (in W)")
+      @dmdl.Constraint(dmdl.set_scenarios)
+      def non_anticipativity_pem(blk, s):
+        return blk.pem_capacity == blk.scenario[s].pem_capacity
 
-    @dmdl.Constraint(dmdl.set_scenarios)
-    def non_anticipativity_pem(blk, s):
-      return blk.pem_capacity == blk.scenario[s].pem_capacity
+      @dmdl.Constraint(dmdl.set_scenarios)
+      def non_anticipativity_tank(blk, s):
+        return blk.h2_tank_capacity == blk.scenario[s].h2_tank_capacity
 
-    @dmdl.Constraint(dmdl.set_scenarios)
-    def non_anticipativity_tank(blk, s):
-      return blk.h2_tank_capacity == blk.scenario[s].h2_tank_capacity
+      @dmdl.Constraint(dmdl.set_scenarios)
+      def non_anticipativity_turbine(blk, s):
+        return blk.h2_turbine_capacity == blk.scenario[s].h2_turbine_capacity
 
-    @dmdl.Constraint(dmdl.set_scenarios)
-    def non_anticipativity_turbine(blk, s):
-      return blk.h2_turbine_capacity == blk.scenario[s].h2_turbine_capacity
+    elif "Renewables" in self._dispatches_model_name:
+      dmdl.windpower_capacity = pyo.Var(within=pyo.NonNegativeReals,
+                                  doc="Design Windpower capacity (in kW)")
+      dmdl.battery_capacity = pyo.Var(within=pyo.NonNegativeReals,
+                                  doc="Design Battery capacity (in kW)")
+      dmdl.pem_capacity = pyo.Var(within=pyo.NonNegativeReals,
+                                  doc="Design PEM capacity (in kW)")
+      dmdl.h2_tank_capacity = pyo.Var(within=pyo.NonNegativeReals,
+                                  doc="Design tank capacity (in mol)")
+      dmdl.h2_turbine_capacity = pyo.Var(within=pyo.NonNegativeReals,
+                                       doc="Design turbine capacity (in W)")
+      @dmdl.Constraint(dmdl.set_scenarios)
+      def non_anticipativity_windpower(blk, s):
+        return blk.windpower_capacity == blk.scenario[s].windpower_capacity
 
-  def _add_objective(self):
-    """
-      Adding objective function using TEAL metrics.
-      @ In, None
-      @ Out, None
-    """
-    # scenario probability weights
-    weights = self._time_sets['weights_scenarios']
+      @dmdl.Constraint(dmdl.set_scenarios)
+      def non_anticipativity_battery(blk, s):
+        return blk.battery_capacity == blk.scenario[s].battery_capacity
 
-    # pyomo expression for full metric wtih scenario weights applied
-    Metric = np.sum( weights[n]*scenario['NPV'] for n, scenario in enumerate(self._metrics) )
+      @dmdl.Constraint(dmdl.set_scenarios)
+      def non_anticipativity_pem(blk, s):
+        return blk.pem_capacity == blk.scenario[s].pem_capacity
 
-    # set objective
-    self._dmdl.obj = pyo.Objective(expr=Metric, sense=pyo.maximize)
+      @dmdl.Constraint(dmdl.set_scenarios)
+      def non_anticipativity_tank(blk, s):
+        return blk.h2_tank_capacity == blk.scenario[s].h2_tank_capacity
+
+      @dmdl.Constraint(dmdl.set_scenarios)
+      def non_anticipativity_turbine(blk, s):
+        return blk.h2_turbine_capacity == blk.scenario[s].h2_turbine_capacity
 
   #==== METHODS CREATING TEAL CASHFLOWS ====#
   def _initialize_cash_flows(self):
@@ -1462,6 +1487,21 @@ class HERD(MOPED):
   # =======================
   # SOLVING OPTIMIZATION
   # =======================
+  def _add_objective(self):
+    """
+      Adding objective function using TEAL metrics.
+      @ In, None
+      @ Out, None
+    """
+    # scenario probability weights
+    weights = self._time_sets['weights_scenarios']
+
+    # pyomo expression for full metric wtih scenario weights applied
+    Metric = np.sum( weights[n]*scenario['NPV'] for n, scenario in enumerate(self._metrics) )
+
+    # set objective
+    self._dmdl.obj = pyo.Objective(expr=Metric*1e-9, sense=pyo.maximize)
+
   def _solve_dispatches_model(self):
     """
       Solve the DISPATCHES Pyomo model.
@@ -1489,7 +1529,7 @@ class HERD(MOPED):
     opt_H2Tank = pyo.value(mdl.h2_tank_capacity) * 2.016e-3 # convert to kg
     opt_H2Turb = pyo.value(mdl.h2_turbine_capacity) * 1e-3 # convert to kW
 
-    print(f'Optimal NPV is ------------------- $B {opt_NPV * 1e-9} ')
+    print(f'Optimal NPV is ------------------- $B {opt_NPV} ')
     print(f'--- Optimal PEM capacity is        {opt_PEM  * 1e-3} MW')
     print(f'--- Optimal H2 Tank capacity is    {opt_H2Tank} kg')
     print(f'--- Optimal H2 Turbine capacity is {opt_H2Turb * 1e-3} MW')

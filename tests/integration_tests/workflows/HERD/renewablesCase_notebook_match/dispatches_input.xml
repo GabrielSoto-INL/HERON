@@ -56,7 +56,7 @@
           <reference_price>
             <fixed_value>-1550</fixed_value> <!-- $/kWh -->
           </reference_price>
-          <depreciate>15</depreciate>
+          <!-- <depreciate>15</depreciate> -->
         </CashFlow>
         <CashFlow name="fixed_OM" type="repeating" period="year" taxable="True" inflation="none" mult_target="False">
           <driver>
@@ -88,7 +88,7 @@
           <reference_price>
             <fixed_value>-1200</fixed_value> <!-- $29/kWh, H2 LHV: 33.3 kWh/kg * 2.016e-3 kg/mol -->
           </reference_price>
-          <depreciate>15</depreciate>
+          <!-- <depreciate>15</depreciate> -->
         </CashFlow>
 
       </economics>
@@ -119,7 +119,7 @@
           <reference_price>
             <fixed_value>-1630</fixed_value> <!-- $/kWh -->
           </reference_price>
-          <depreciate>15</depreciate>
+          <!-- <depreciate>15</depreciate> -->
         </CashFlow>
         <CashFlow name="fixed_OM" type="repeating" period="year" taxable="True" inflation="none" mult_target="False">
           <driver>
@@ -158,7 +158,7 @@
           <reference_price>
             <fixed_value>-971.5</fixed_value> <!-- $29/kWh, H2 LHV: 33.3 kWh/kg * 2.016e-3 kg/mol -->
           </reference_price>
-          <depreciate>15</depreciate>
+          <!-- <depreciate>15</depreciate> -->
         </CashFlow>
 
       </economics>
@@ -191,7 +191,7 @@
           <reference_price>
             <fixed_value>-1000</fixed_value> <!-- $/kW -->
           </reference_price>
-          <depreciate>15</depreciate>
+          <!-- <depreciate>15</depreciate> -->
         </CashFlow>
 
         <CashFlow name="fixed_OM" type="repeating" period="year" taxable="True" inflation="none" mult_target="False">
@@ -309,7 +309,7 @@
 
   <DataGenerators>
     <!-- to trigger the use of the JSON LMP signal, name needs to be 'dispatches-test'-->
-    <CSV name='dispatches-test' variable="PRICE,WIND">%BASE_WORKING_DIR%/../Price_and_Wind.csv</CSV>
+    <CSV name='dispatches-test' variable="PRICE,WIND">%BASE_WORKING_DIR%/../Price_and_Wind_short.csv</CSV>
     <Function name="input-params">extra_input_parameters.py</Function>
   </DataGenerators>
 
