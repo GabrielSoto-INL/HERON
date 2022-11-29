@@ -13,6 +13,7 @@ import pandas as pd
 from itertools import compress
 import pyomo.environ as pyo
 from pyomo.opt import SolverFactory
+from pyomo.environ import units as pyunits
 import numpy as np
 import _utils as hutils
 from functools import partial
@@ -33,11 +34,13 @@ try:
                                                                       fix_dof_and_initialize)
   # Renewables flowsheet
   from dispatches.case_studies.renewables_case.wind_battery_PEM_tank_turbine_LMP import \
-                                             (wind_battery_pem_tank_turb_mp_block,
+                                             (wind_battery_pem_tank_turb_model,
                                               wind_battery_pem_tank_turb_variable_pairs,
                                               wind_battery_pem_tank_turb_periodic_variable_pairs)
   # Import function for the construction of the multiperiod model
   from idaes.apps.grid_integration import MultiPeriodModel
+  import idaes.logger as idaeslog
+  from idaes.core.util.initialization import propagate_state
   from idaes.core.solvers import get_solver
 except ModuleNotFoundError:
   print("DISPATCHES has not been found in current conda environment. This is only needed when "+
@@ -224,6 +227,7 @@ class HERD(MOPED):
     self._time_sets = {}
     self._multiperiod_options = {}
     self._external_func = None
+    self._flowsheet = None
 
     # Testing - using LMP signals from JSON script as used in example Jupyter notebook
     #    intended years to test out (2022-2031, use same data. 2032-2041, use same data)
@@ -242,27 +246,26 @@ class HERD(MOPED):
       @ Out, None
     """
     # get project life for simulation
-    self._projectTime = int(self._case._global_econ['ProjectTime'])
+    self._projectTime = int( operator.attrgetter("_case._global_econ")(self)['ProjectTime'] )
 
     # check if external functions have been passed in through XML, used to load extraneous params
     external_functions  = [src for src in self._sources if getattr(src,'_type') == 'Function']
     self._external_func = [func for func in external_functions if func.name == 'input-params']
 
     # if running a DISPATCHES test, testing against case study notebook results w/ notebook data
-    #    - running an abridged simulation:
-    #        * if project time is 20 yrs, only create variables for discrete sets of years
-    #        * e.g., 1 set of variables for 10 years, another set of variables for the next 10
-    #    - loading synthetic history data from static csv files or other methods
-    #    - TODO: is this abridged variable creature a feature of interest apart from testing?
-    dispatches_test_sources = [source.name == 'dispatches-test' for source in self._sources]
+    #  - running an abridged simulation:
+    #     * if project time is 20 yrs, only create variables for discrete sets of years
+    #     * e.g., 1 set of variables for 10 years, another set of variables for the next 10
+    #  - loading synthetic history data from static csv files or other methods
+    #  - TODO: is this abridged variable creature a feature of interest apart from testing?
+    dispatches_test_sources = [src.name == 'dispatches-test' for src in self._sources]
+
     # check if any of the synthetic history sources request a dispatches-test
     if np.any(dispatches_test_sources):
       self._test_mode = True
       self._override_test_time_sets()
-      # testing for 20 year project life, override because it doesnt match LMP JSON signal
-      globalEcon = getattr(self._case,"_global_econ")
-      globalEcon["ProjectTime"] = self._projectTime # some funky pointer stuff here
 
+    # save number of samples to self
     self._num_samples = getattr(self._case,"_num_samples")
 
   def _override_test_time_sets(self):
@@ -271,25 +274,23 @@ class HERD(MOPED):
       @ In, None
       @ Out, None
     """
-    projectTime = self._projectTime
+    projectTime = copy.deepcopy(self._projectTime)
 
     if len(self._external_func) > 0:
-      methods     = getattr(self._external_func[0], '_module_methods')
+      methods = getattr(self._external_func[0], '_module_methods')
+      assert 'load_time_set_parameters' in methods
       time_params = methods['load_time_set_parameters'](projectTime)
       self._test_years = time_params['years']
-      test_project_year_range = [ [y]*n for y,n in zip(time_params['years'],
-                                                       time_params['n_years_per_set'])]
-      self._test_set_years = np.array(test_project_year_range).flatten()
+      zipped_time_params = zip(time_params['years'], time_params['n_years_per_set'])
+      test_project_year_map = [ [y]*n for y,n in zipped_time_params]
+      self._test_years_map = np.array(test_project_year_map).flatten()
     else:
-      self._test_set_years = self._test_years * projectTime
+      self._test_years_map = self._test_years * projectTime
 
     # range of years through intended project life (_test_years contained within this set)
     # NOTE: year[0]-1 is the construction year
     test_years = self._test_years
     self._test_set_years = np.arange(test_years[0], test_years[0] + projectTime)
-    # array map, same length as project year range but with entries in _test_years
-    self._test_years_map = np.array([test_years[sum(y>=test_years) - 1]
-                                            for y in self._test_set_years])
 
   def buildComponentMeta(self):
     """
@@ -813,7 +814,7 @@ class HERD(MOPED):
     flowsheet_options = self._multiperiod_options['flowsheet_options']
     init_options      = self._multiperiod_options['initialization_options']
     unfix_dof_options = self._multiperiod_options['unfix_dof_options']
-    staging_params = self._multiperiod_options['staging_params']
+    staging_params    = self._multiperiod_options['staging_params']
 
     function_links = self._get_process_functions_for_idaes(staging_params=staging_params)
 
@@ -840,13 +841,10 @@ class HERD(MOPED):
 
     # looping through all sampled scenarios
     for s in self._time_sets['set_scenarios']:
-
       # Add first-stage variables
-      self._add_capacity_variables(self._dmdl.scenario[s])
-
+      self._add_capacity_variables(self._dmdl.scenario[s], staging_params)
       # Hydrogen demand constraint (Divide the RHS by the molecular mass to convert kg/s to mol/s)
       self._add_additional_constraints(self._dmdl.scenario[s])
-
       # Append cash flow expressions
       for hComp, tComp in zip(heron_components, teal_components): #this zip might be danger
         # skip components within HERON that are NOT defined in DISPATCHES template
@@ -854,7 +852,6 @@ class HERD(MOPED):
           continue
         # create cashflows using TEAL (capex, yearly or hourly)
         self._create_cash_flows_for_dispatches(self._dmdl.scenario[s], hComp, tComp, s)
-
       # compute desired metric using TEAL and storing it
       scenario_metric = RunCashFlow.run(self._econ_settings, teal_components, {}, pyomoVar=True)
       self._metrics.append( scenario_metric )
@@ -881,7 +878,11 @@ class HERD(MOPED):
                                                      else sets['synth_years']
     time_sets['set_scenarios'] = sets['synth_scenarios']
     time_sets['n_time_points'] = len(time_sets['set_time'])
-
+    time_sets['set_period']    = [ (t, d, y)
+                                  for y in time_sets['set_years']
+                                  for d in time_sets['set_days']
+                                  for t in time_sets['set_time']
+                                 ]
     # transferring information on weightings
     time_sets['weights_days'] = a_synthetic_history['weights_days']
     # NOTE: equal probability for all scenarios
@@ -899,7 +900,7 @@ class HERD(MOPED):
 
     if "Nuclear" in self._dispatches_model_name:
       # TODO: these should be populated from a mix of XML input and External function
-      # wrapping fs options in a dict allow extraction downstream and keep staging_params intact
+      # wrapping fs options in a dict allows extraction downstream and keeps staging_params intact
       multiperiod_options['flowsheet_options'] ={'fs_options':
                                                     {"np_capacity": 1000}
                                                 }
@@ -911,32 +912,29 @@ class HERD(MOPED):
                                 }
       multiperiod_options['unfix_dof_options'] = {}
       multiperiod_options['staging_params'] = {}
-
     elif "Renewables" in self._dispatches_model_name:
       # if external function for extra input parameters is found...
       if len(self._external_func) > 0:
-
-        wind_keyword  = set(self._synth_histories.keys()).intersection(['WIND', 'Wind', 'wind'])
+        # check for wind data
         wind_data = None
+        wind_keyword  = set(self._synth_histories.keys()).intersection(['WIND', 'Wind', 'wind'])
         if len(wind_keyword) > 0:
           wind_data = self._synth_histories[wind_keyword.pop()]['signals']
-
-        price_keyword = set(self._synth_histories.keys()).intersection(['PRICE', 'Price', 'price'])
+        # check for price data
         price_data = None
+        price_keyword = set(self._synth_histories.keys()).intersection(['PRICE', 'Price', 'price'])
         if len(price_keyword) > 0:
           price_data = self._synth_histories[price_keyword.pop()]['signals']
-
-        methods      = getattr(self._external_func[0], '_module_methods')
+        # get appropriate method and use wind/price data as inputs
+        methods = getattr(self._external_func[0], '_module_methods')
         extra_params = methods['load_parameters'](self._time_sets, wind_data, price_data)
-
-      multiperiod_options['flowsheet_options'] = {}
+      # set rest of parameters with empty dicts (except for staging parameters)
+      multiperiod_options['flowsheet_options'] = {'fs_options':{} }
       multiperiod_options['initialization_options'] = {}
       multiperiod_options['unfix_dof_options'] = {}
       multiperiod_options['staging_params'] = extra_params
-
     else:
       raise IOError("Unexpected DISPATCHES model name.")
-
     return multiperiod_options
 
   def _get_process_functions_for_idaes(self, staging_params):
@@ -944,6 +942,7 @@ class HERD(MOPED):
     function_links = {}
     if "Nuclear" in self._dispatches_model_name:
       # using partial to sneak in an extra dictionary input to the call
+      self._flowsheet = build_ne_flowsheet
       function_links['process_func'] = partial(self.flowsheet_block, staging_params=staging_params)
       function_links['fix_dof_func'] = fix_dof_and_initialize
       function_links['unfix_dof_func'] = self.unfixDof
@@ -951,8 +950,11 @@ class HERD(MOPED):
       function_links['periodic_var_pairs_func'] = None
 
     elif "Renewables" in self._dispatches_model_name:
-      function_links['process_func'] = partial(wind_battery_pem_tank_turb_mp_block,
-                                                input_params=staging_params, verbose=False)
+      # not including 'wind_resource_config' here because it will need to be indexed downstream
+      self._flowsheet = partial(wind_battery_pem_tank_turb_model,
+                                input_params=staging_params,
+                                verbose=False)
+      function_links['process_func'] = partial(self.flowsheet_block, staging_params=staging_params)
       function_links['fix_dof_func'] = None
       function_links['unfix_dof_func'] = None
       function_links['link_var_pairs_func'] = partial(wind_battery_pem_tank_turb_variable_pairs,
@@ -977,19 +979,43 @@ class HERD(MOPED):
       @ In, staging_params, dict, extra arguments not intended for flowsheet
       @ Out, None
     """
+    wind_rsrc = {}
+    if "wind_resource" in staging_params.keys():
+      period = getattr(mdl, '_index')
+      wind_rsrc = staging_params['wind_resource'][period]['wind_resource_config']
+
     if isinstance(mdl, pyo.ConcreteModel):
       # building a simple model for the initialization method
-      mdl = build_ne_flowsheet(mdl, **fs_options)
+      # NOTE: this will be deprecated in the near future
+      mdl = self._flowsheet(mdl, **fs_options)
     else:
       # this means mdl is a _BlockData object, being called from `build_stochastic_multi_period` for
       # a given period (e.g., hr:10, d:2, yr:2022)
       if 'pyo_model' not in staging_params.keys():
         # if this is the first call, creates a Pyomo model with flowsheet attributes
         # then saves it to the staging_params dictionary.
-        staging_params['pyo_model'] = build_ne_flowsheet(**fs_options)
+        if "wind_resource" in staging_params.keys():
+          staging_params['pyo_model'] = self._flowsheet(wind_resource_config=wind_rsrc, **fs_options)
+        else:
+          staging_params['pyo_model'] = self._flowsheet(**fs_options)
       # on subsequent calls, it just pulls the saved model, clones it, and transfers
       # attributes to current period model
       mdl.transfer_attributes_from(staging_params['pyo_model'].clone())
+
+    if "wind_resource" in staging_params.keys():
+      if 'resource_speed' in wind_rsrc.keys():
+        mdl.fs.windpower.config.resource_speed = wind_rsrc['resource_speed']
+      elif 'capacity_factor' in wind_rsrc.keys():
+        mdl.fs.windpower.config.capacity_factor = wind_rsrc['capacity_factor']
+      else:
+        raise ValueError("`wind_resource_config` dict must contain either 'resource_speed' or 'capacity_factor' values")
+
+      mdl.fs.windpower.setup_resource()
+
+      outlvl = idaeslog.INFO # TODO: if verbose else idaeslog.WARNING
+      mdl.fs.windpower.initialize(outlvl=outlvl)
+      propagate_state(mdl.fs.wind_to_splitter)
+      mdl.fs.splitter.initialize()
 
   def unfixDof(self, ps, **kwargs):
     """
@@ -1051,7 +1077,7 @@ class HERD(MOPED):
     return pairs
 
   #==== METHODS FOR FLOWSHEET-SPECIFIC PYOMO ADDITIONS ====#
-  def _add_capacity_variables(self, mdl):
+  def _add_capacity_variables(self, mdl, input_params):
     """
       Setting first-stage capacity variables for model.
       Also sets upper bound constraints on resource production not exceeding capacity.
@@ -1064,29 +1090,78 @@ class HERD(MOPED):
     """
     set_period = mdl.parent_block().set_period
 
-    # Declare first-stage variables (Design decisions)
-    mdl.pem_capacity = pyo.Var(within=pyo.NonNegativeReals,
-                                doc="Maximum capacity of the PEM electrolyzer (in kW)" )
-    mdl.h2_tank_capacity = pyo.Var(within=pyo.NonNegativeReals,
-                                 doc="Maximum holdup of the tank (in mol)")
-    mdl.h2_turbine_capacity = pyo.Var(within=pyo.NonNegativeReals,
-                                       doc="Maximum power output from the turbine (in W)")
+    if "Nuclear" in self._dispatches_model_name:
+      # Declare first-stage variables (Design decisions)
+      mdl.pem_capacity = pyo.Var(within=pyo.NonNegativeReals,
+                                 doc="Maximum capacity of the PEM electrolyzer (in kW)" )
+      mdl.h2_tank_capacity = pyo.Var(within=pyo.NonNegativeReals,
+                                     doc="Maximum holdup of the tank (in mol)")
+      mdl.h2_turbine_capacity = pyo.Var(within=pyo.NonNegativeReals,
+                                        doc="Maximum power output from the turbine (in W)")
 
-    # initializing capacity constraints using set period from block
-    mdl.pem_capacity_constraint = pyo.Constraint(set_period)
-    mdl.tank_capacity_constraint = pyo.Constraint(set_period)
-    mdl.turbine_capacity_constraint = pyo.Constraint(set_period)
+      # initializing capacity constraints using set period from block
+      mdl.pem_capacity_constraint = pyo.Constraint(set_period)
+      mdl.tank_capacity_constraint = pyo.Constraint(set_period)
+      mdl.turbine_capacity_constraint = pyo.Constraint(set_period)
+
+    elif "Renewables" in self._dispatches_model_name:
+      # Declare first-stage variables (Design decisions)
+      mdl.wind_system_capacity = pyo.Var(domain=pyo.NonNegativeReals,
+                                         initialize=input_params['wind_mw'] * 1e3,
+                                         units=pyunits.kW,
+                                         bounds=(0, input_params['wind_mw_ub'] * 1e3))
+      mdl.battery_capacity = pyo.Var(domain=pyo.NonNegativeReals,
+                                     initialize=input_params['batt_mw'] * 1e3,
+                                     units=pyunits.kW)
+      mdl.pem_capacity = pyo.Var(domain=pyo.NonNegativeReals,
+                                 initialize=input_params['pem_mw'] * 1e3,
+                                 units=pyunits.kW)
+      mdl.h2_tank_capacity = pyo.Var(domain=pyo.NonNegativeReals,
+                                     initialize=input_params['tank_size'])
+      mdl.h2_turbine_capacity = pyo.Var(domain=pyo.NonNegativeReals,
+                                        initialize=input_params['turb_mw'] * 1e3,
+                                        units=pyunits.kW)
+
+      # initializing capacity constraints using set period from block
+      mdl.wind_capacity_constraint = pyo.Constraint(set_period)
+      mdl.battery_capacity_constraint = pyo.Constraint(set_period)
+      mdl.pem_capacity_constraint = pyo.Constraint(set_period)
+      mdl.tank_capacity_constraint = pyo.Constraint(set_period)
+      mdl.turbine_capacity_constraint = pyo.Constraint(set_period)
+    else:
+      raise IOError("Unexpected DISPATCHES model name.")
 
     for t in set_period:
-      # Ensure that the electricity to the PEM elctrolyzer does not exceed the PEM capacity
-      mdl.pem_capacity_constraint.add(t,
-          mdl.period[t].fs.pem.electricity[0] <= mdl.pem_capacity)
-      # Ensure that the final tank holdup does not exceed the tank capacity
-      mdl.tank_capacity_constraint.add(t,
-          mdl.period[t].fs.h2_tank.tank_holdup[0] <= mdl.h2_tank_capacity)
-      # Ensure that the power generated by the turbine does not exceed the turbine capacity
-      mdl.turbine_capacity_constraint.add(t,
-          -mdl.period[t].fs.h2_turbine.work_mechanical[0] <= mdl.h2_turbine_capacity)
+      if "Nuclear" in self._dispatches_model_name:
+        # Ensure that the electricity to the PEM elctrolyzer does not exceed the PEM capacity
+        mdl.pem_capacity_constraint.add(t,
+            mdl.period[t].fs.pem.electricity[0] <= mdl.pem_capacity)
+        # Ensure that the final tank holdup does not exceed the tank capacity
+        mdl.tank_capacity_constraint.add(t,
+            mdl.period[t].fs.h2_tank.tank_holdup[0] <= mdl.h2_tank_capacity)
+        # Ensure that the power generated by the turbine does not exceed the turbine capacity
+        mdl.turbine_capacity_constraint.add(t,
+            -mdl.period[t].fs.h2_turbine.work_mechanical[0] <= mdl.h2_turbine_capacity)
+
+      elif "Renewables" in self._dispatches_model_name:
+        # Ensure that the electricity to the wind system does not exceed the wind capacity
+        mdl.wind_capacity_constraint.add(t,
+            mdl.period[t].fs.windpower.system_capacity <= mdl.wind_system_capacity)
+        # Ensure that the electricity to the battery does not exceed the battery capacity
+        mdl.battery_capacity_constraint.add(t,
+            mdl.period[t].fs.battery.nameplate_power <= mdl.battery_capacity)
+        # Ensure that the electricity to the PEM elctrolyzer does not exceed the PEM capacity
+        mdl.pem_capacity_constraint.add(t,
+            mdl.period[t].fs.pem.electricity[0] <= mdl.pem_capacity)
+        # Ensure that the final tank holdup does not exceed the tank capacity
+        # TODO: add non-simple H2 Tank using input_params
+        mdl.tank_capacity_constraint.add(t,
+            mdl.period[t].fs.h2_tank.tank_holdup[0] <= mdl.h2_tank_capacity)
+        # Ensure that the power generated by the turbine does not exceed the turbine capacity
+        mdl.turbine_capacity_constraint.add(t,
+            mdl.period[t].fs.h2_turbine.electricity[0] <= mdl.h2_turbine_capacity)
+      else:
+        raise IOError("Unexpected DISPATCHES model name.")
 
   def _add_additional_constraints(self, mdl):
     """
@@ -1291,8 +1366,7 @@ class HERD(MOPED):
       @ Out, None
     """
     # project life time + 1, first year has to be 0 for recurring cash flows
-    project_life = int( operator.attrgetter("_case._global_econ")(self)['ProjectTime'] )
-    project_life += 1
+    project_life = self._projectTime + 1
 
     # time indeces for HERON/TEAL
     n_hours = len(self._dmdl.set_time)
@@ -1334,8 +1408,8 @@ class HERD(MOPED):
       if pyear > set_years_map[p-1]:
         pcount +=1
 
-      for time in range(n_hours_per_year):
-        ind = tuple(indeces[pcount,time])
+      for t in range(n_hours_per_year):
+        ind = tuple(indeces[pcount,t])
         # looping through all DISPATCHES variables pertaining to this specific dispatch
         #   e.g., turbine costs due to work done by turbine + compressor, separate variables
         dispatch_driver = 0
@@ -1347,7 +1421,7 @@ class HERD(MOPED):
         weight = self._time_sets['weights_days'][yr][dy]  # extracting weight for year + day
 
         # storing individual Pyomo dispatch
-        dispatch_array[p, time] = dispatch_driver * weight
+        dispatch_array[p, t] = dispatch_driver * weight
 
     return dispatch_array
 
@@ -1357,8 +1431,7 @@ class HERD(MOPED):
       @ In, alpha, synthetic history dictionary for time series cash flow
       @ Out, None
     """
-    project_life = int( operator.attrgetter("_case._global_econ")(self)['ProjectTime'] )
-    project_life += 1
+    project_life = self._projectTime + 1
 
     signal = alpha['signals']
     set_scenarios = alpha['sets']['synth_scenarios']
