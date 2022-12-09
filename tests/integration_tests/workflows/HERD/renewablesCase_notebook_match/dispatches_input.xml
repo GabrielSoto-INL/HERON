@@ -38,6 +38,8 @@
   <!-- HERON is unit agnostic, DISPATCHES is NOT!   -->
   <!--   HERON: power unit is kW, price is $, mass is kg   -->
   <!--   DISPATCHES: power unit is kW or W, price is $, mass is mol   -->
+
+  <!-- NOTE that if project time <=1, cannot use depreciate node in TEAL (breaks) -->
   <Components>
     <Component name="windpower">
       <produces resource="electricity" dispatch="independent">
@@ -56,7 +58,7 @@
           <reference_price>
             <fixed_value>-1550</fixed_value> <!-- $/kWh -->
           </reference_price>
-          <!-- <depreciate>15</depreciate> -->
+          <!-- <depreciate>3</depreciate> -->
         </CashFlow>
         <CashFlow name="fixed_OM" type="repeating" period="year" taxable="True" inflation="none" mult_target="False">
           <driver>
@@ -88,7 +90,7 @@
           <reference_price>
             <fixed_value>-1200</fixed_value> <!-- $29/kWh, H2 LHV: 33.3 kWh/kg * 2.016e-3 kg/mol -->
           </reference_price>
-          <!-- <depreciate>15</depreciate> -->
+          <!-- <depreciate>3</depreciate> -->
         </CashFlow>
 
       </economics>
@@ -119,7 +121,7 @@
           <reference_price>
             <fixed_value>-1630</fixed_value> <!-- $/kWh -->
           </reference_price>
-          <!-- <depreciate>15</depreciate> -->
+          <!-- <depreciate>3</depreciate> -->
         </CashFlow>
         <CashFlow name="fixed_OM" type="repeating" period="year" taxable="True" inflation="none" mult_target="False">
           <driver>
@@ -156,9 +158,9 @@
             <variable>h2tank_capacity</variable>
           </driver>
           <reference_price>
-            <fixed_value>-971.5</fixed_value> <!-- $29/kWh, H2 LHV: 33.3 kWh/kg * 2.016e-3 kg/mol -->
+            <fixed_value>-971.5</fixed_value> <!-- $/kg -->
           </reference_price>
-          <!-- <depreciate>15</depreciate> -->
+          <!-- <depreciate>3</depreciate> -->
         </CashFlow>
 
       </economics>
@@ -191,7 +193,7 @@
           <reference_price>
             <fixed_value>-1000</fixed_value> <!-- $/kW -->
           </reference_price>
-          <!-- <depreciate>15</depreciate> -->
+          <!-- <depreciate>3</depreciate> -->
         </CashFlow>
 
         <CashFlow name="fixed_OM" type="repeating" period="year" taxable="True" inflation="none" mult_target="False">
@@ -208,7 +210,7 @@
             <activity>electricity</activity>
           </driver>
           <reference_price>
-            <fixed_value>-4.25e-6</fixed_value> <!-- $4.25/MWh to $/W -->
+            <fixed_value>-4.25e-3</fixed_value> <!-- $4.25/MWh to $/kW -->
           </reference_price>
         </CashFlow>
       </economics>
@@ -273,12 +275,12 @@
         <CashFlow name="electricity_revenue" type="repeating" period="hour" taxable='True' inflation='none' mult_target='False'>
           <driver>
             <activity>electricity</activity>
+            <multiplier>1e-3</multiplier> <!-- convert to $/kWh -->
           </driver>
           <reference_price>
             <!-- ballpark $25/MWh -->
             <CSV variable="PRICE">dispatches-test</CSV> <!-- assumed $/MWh-->
-              <!-- convert to $/kWh -->
-            </reference_price>
+          </reference_price>
         </CashFlow>
       </economics>
     </Component>
@@ -299,7 +301,7 @@
           </driver>
           <reference_price>
             <!-- ballpark $3/kg -->
-            <fixed_value>-2.25</fixed_value> <!-- $/kg -->
+            <fixed_value>2.25</fixed_value> <!-- $/kg -->
             <multiplier>1</multiplier> <!-- convert to $/mol by multiplying kg/mol-->
           </reference_price>
         </CashFlow>
@@ -309,7 +311,7 @@
 
   <DataGenerators>
     <!-- to trigger the use of the JSON LMP signal, name needs to be 'dispatches-test'-->
-    <CSV name='dispatches-test' variable="PRICE,WIND">%BASE_WORKING_DIR%/../Price_and_Wind_short.csv</CSV>
+    <CSV name='dispatches-test' variable="PRICE,WIND">%BASE_WORKING_DIR%/../Price_and_Wind.csv</CSV>
     <Function name="input-params">extra_input_parameters.py</Function>
   </DataGenerators>
 

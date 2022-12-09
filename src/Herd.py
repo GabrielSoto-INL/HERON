@@ -56,6 +56,9 @@ from TEAL.src import CashFlows
 from TEAL.src import main as RunCashFlow
 from HERON.src.Moped import MOPED
 
+# NOTE: All Dispatch-Expressions are expected to have a list in their final object attribute
+#    and so are indexed as <object>.<long object path>.<final attribute>[0].
+#    To override this, include a nested list for a single entry where the list occurs mid-path
 DISPATCHES_MODEL_COMPONENT_META={
   "Nuclear Case": {
     "pem":{ # TODO: will require some transfer function
@@ -66,7 +69,9 @@ DISPATCHES_MODEL_COMPONENT_META={
           "Expressions": 'pem_capacity',
         },
         "Dispatch":{
-          "Expressions": ['fs.pem.electricity'],
+          "Expressions": [
+                          'fs.pem.electricity'
+                         ],
         },
       },
     },
@@ -88,8 +93,10 @@ DISPATCHES_MODEL_COMPONENT_META={
           "Expressions": 'h2_turbine_capacity',
         },
         "Dispatch":{
-          "Expressions": ['fs.h2_turbine.turbine.work_mechanical',
-            'fs.h2_turbine.compressor.work_mechanical'],
+          "Expressions": [
+                          'fs.h2_turbine.turbine.work_mechanical',
+                          'fs.h2_turbine.compressor.work_mechanical'
+                         ],
           "Multiplier":  [-1, -1] # extra multiplier to ensure correct sign
         },
       },
@@ -99,9 +106,11 @@ DISPATCHES_MODEL_COMPONENT_META={
       "Consumes": {},
       "Cashflows":{
         "Dispatch":{
-          "Expressions": ['fs.np_power_split.np_to_grid_port.electricity',
-            'fs.h2_turbine.turbine.work_mechanical',
-            'fs.h2_turbine.compressor.work_mechanical'],
+          "Expressions": [
+                          'fs.np_power_split.np_to_grid_port.electricity',
+                          'fs.h2_turbine.turbine.work_mechanical',
+                          'fs.h2_turbine.compressor.work_mechanical'
+                         ],
           "Multiplier":  [1e-3, -1e-6, -1e-6] # NOTE: h2 turbine is in W, convert to kW
         },
       },
@@ -111,7 +120,9 @@ DISPATCHES_MODEL_COMPONENT_META={
       "Consumes": {},
       "Cashflows":{
         "Dispatch":{
-          "Expressions": ['fs.h2_tank.outlet_to_pipeline.flow_mol'],
+          "Expressions": [
+                          'fs.h2_tank.outlet_to_pipeline.flow_mol'
+                         ],
           "Multiplier":  [7.2576] # convert 1/s to 1/hr and 2.016e-3 kg/mol -> kg/hr
         },
       },
@@ -144,7 +155,9 @@ DISPATCHES_MODEL_COMPONENT_META={
           "Expressions": 'pem_capacity',
         },
         "Dispatch":{
-          "Expressions": ['fs.pem.electricity'],
+          "Expressions": [
+                          'fs.pem.electricity',
+                         ],
         },
       },
     },
@@ -154,11 +167,11 @@ DISPATCHES_MODEL_COMPONENT_META={
       "Cashflows":{
         "Capacity":{
           "Expressions": 'h2_tank_capacity',
-          "Multiplier":  2.016e-3, # H2 Molar Mass = 2.016e-3 kg/mol
+          "Multiplier":  1, # H2 Molar Mass = 2.016e-3 kg/mol
         },
       },
     },
-    "h2turbine":{ # TODO: technically also consumes air, will need to revisit
+    "h2turbine":{ # TODO: technically also consumes air, might need to revisit
       "Produces": 'electricity',
       "Consumes": 'hydrogen',
       "Cashflows":{
@@ -166,7 +179,9 @@ DISPATCHES_MODEL_COMPONENT_META={
           "Expressions": 'h2_turbine_capacity',
         },
         "Dispatch":{
-          "Expressions": ['fs.h2_turbine.electricity'],
+          "Expressions": [
+                          'fs.h2_turbine.electricity',
+                         ],
         },
       },
     },
@@ -176,10 +191,10 @@ DISPATCHES_MODEL_COMPONENT_META={
       "Cashflows":{
         "Dispatch":{
           "Expressions": [
-            'fs.splitter.grid_elec',
-            'fs.battery.elec_out',
-            'fs.h2_turbine.electricity'
-            ],
+                          'fs.splitter.grid_elec',
+                          'fs.battery.elec_out',
+                          'fs.h2_turbine.electricity'
+                          ],
         },
       },
     },
@@ -187,9 +202,12 @@ DISPATCHES_MODEL_COMPONENT_META={
       "Demands":  'hydrogen',
       "Consumes": {},
       "Cashflows":{
-        "Dispatch":{
-          "Expressions": ['fs.h2_tank.outlet_to_pipeline.flow_mol'],
-          "Multiplier":  [7.2576] # convert 1/s to 1/hr and 2.016e-3 kg/mol -> kg/hr
+        "Dispatch":{ #TODO: need purchased hydrogen feed
+          "Expressions": [
+                          'fs.h2_tank.outlet_to_pipeline.flow_mol',
+                          ['fs.mixer.purchased_hydrogen_feed_state', 'flow_mol'],
+                         ],
+          "Multiplier":  [7.2576, -7.2576] # convert 1/s to 1/hr and 2.016e-3 kg/mol -> kg/hr
         },
       },
     },
@@ -394,7 +412,7 @@ class HERD(MOPED):
       @ In, signal, string, name of signal to sample
       @ Out, synthetic_histories, dict, contains data from evaluated ROM
     """
-    if signal.lower() == 'price' and multiplier == -1:
+    if signal.lower() == 'price' and np.sign(multiplier) < 0:
       multiplier *= -1 # undoing negative multiplier from one step above, price != demand
 
     # NOTE self._sources[0]._var_names are the user assigned signal names in DataGenerators
@@ -532,7 +550,7 @@ class HERD(MOPED):
       @ In, multiplier, int/float, value to multiply synthetic history evaluations by
       @ Out, synthetic_data, dict, contains data from evaluated ROM
     """
-    if signal.lower() == 'price' and multiplier == -1:
+    if signal.lower() == 'price' and np.sign(multiplier) < 0:
       multiplier *= -1 # undoing negative multiplier from one step above, price != demand
 
     # NOTE self._sources[0]._var_names are the user assigned signal names in DataGenerators
@@ -646,7 +664,6 @@ class HERD(MOPED):
   # ===========================
   # DISPATCHES COMPATIBILITY
   # ===========================
-
   def _resolve_incompatible_sets(self, incompatible_set, exceptions):
     """
       Helper method to remove exceptions from set of incompatible entries
@@ -1112,9 +1129,9 @@ class HERD(MOPED):
     elif "Renewables" in self._dispatches_model_name:
       # Declare first-stage variables (Design decisions)
       mdl.windpower_capacity = pyo.Var(domain=pyo.NonNegativeReals,
-                                         initialize=input_params['wind_mw'] * 1e3,
-                                         units=pyunits.kW,
-                                         bounds=(0, input_params['wind_mw_ub'] * 1e3))
+                                       initialize=input_params['wind_mw'] * 1e3,
+                                       units=pyunits.kW,
+                                       bounds=(0, input_params['wind_mw_ub'] * 1e3))
       mdl.battery_capacity = pyo.Var(domain=pyo.NonNegativeReals,
                                      initialize=input_params['batt_mw'] * 1e3,
                                      units=pyunits.kW)
@@ -1122,7 +1139,8 @@ class HERD(MOPED):
                                  initialize=input_params['pem_mw'] * 1e3,
                                  units=pyunits.kW)
       mdl.h2_tank_capacity = pyo.Var(domain=pyo.NonNegativeReals,
-                                     initialize=input_params['tank_size'])
+                                     initialize=input_params['tank_size'],
+                                     units=pyunits.kg,)
       mdl.h2_turbine_capacity = pyo.Var(domain=pyo.NonNegativeReals,
                                         initialize=input_params['turb_mw'] * 1e3,
                                         units=pyunits.kW)
@@ -1376,6 +1394,10 @@ class HERD(MOPED):
     capacity_dict  = cashflows_dict['Capacity']
     capacity_str   = capacity_dict['Expressions']
 
+    # extracting a Pyomo expression specified by user which represents capacity variable
+    # at given time. using `operator.attrgetter` to access variables because it allows accessing
+    # object members via string of the expression's address (lots of nested Pyomo objects).
+    # the usual call looks like `operator.attrgetter(string)(object)[optional indexing]`
     capacity_driver = operator.attrgetter(capacity_str)(mdl)
     mult = capacity_dict['Multiplier'] if 'Multiplier' in capacity_dict.keys() else 1
 
@@ -1419,6 +1441,7 @@ class HERD(MOPED):
     set_period = mdl.parent_block().set_period
     indeces = np.array([tuple(i) for i in set_period], dtype="i,i,i")
     time_shape = (n_years, n_hours_per_year) # reshaping the tuples array to match HERON dispatch
+    print(dispatch_strs)
     indeces = indeces.reshape(time_shape)
 
     # extra multipliers specific to DISPATCHES (e.g., have to multiply turbine work done by -1)
@@ -1437,9 +1460,27 @@ class HERD(MOPED):
         ind = tuple(indeces[pcount,t])
         # looping through all DISPATCHES variables pertaining to this specific dispatch
         #   e.g., turbine costs due to work done by turbine + compressor, separate variables
+
+        # extracting a Pyomo expression specified by user which represents resource being dispatched
+        # at given time. using `operator.attrgetter` to access variables because it allows accessing
+        # object members via string of the expression's address (lots of nested Pyomo objects).
+        # the usual call looks like `operator.attrgetter(string)(object)[optional indexing]`
         dispatch_driver = 0
         for ds, dStr in enumerate(dispatch_strs):
-          dispatch_driver += operator.attrgetter(dStr)(mdl.period[ind])[0] * dMults[ds]
+          # Dispatch expressions in DISPATCHES are always stored in a list somewhere in the nested
+          # object chain. Here, we let the user define the address to get to the desired expression
+          if isinstance(dStr, list):
+            # if string name of dispatch variable is in a list here, it means that the list where
+            # the expression is stored doesn't occur at the end of the object chain.
+            # Location of expression list is between the two entries of the dStr list. We access
+            # expression in two steps: 1) use attrgetter on first part of string and extract Pyomo
+            # list entry using [0] then 2) access final expression with second string in dStr
+            first_part = operator.attrgetter(dStr[0])(mdl.period[ind])[0] # first part indexed
+            dispatch_driver += operator.attrgetter(dStr[1])(first_part) * dMults[ds] # multiplier
+          else:
+            # default is for there to just be 1 str for the dispatch variable name, we just use
+            # entire string to access expression and index list at the end
+            dispatch_driver += operator.attrgetter(dStr)(mdl.period[ind])[0] * dMults[ds]
 
         # getting weights for each day/cluster
         dy, yr = ind[1:]
@@ -1530,9 +1571,9 @@ class HERD(MOPED):
     opt_H2Turb = pyo.value(mdl.h2_turbine_capacity) * 1e-3 # convert to kW
 
     print(f'Optimal NPV is ------------------- $B {opt_NPV} ')
-    print(f'--- Optimal PEM capacity is        {opt_PEM  * 1e-3} MW')
-    print(f'--- Optimal H2 Tank capacity is    {opt_H2Tank} kg')
-    print(f'--- Optimal H2 Turbine capacity is {opt_H2Turb * 1e-3} MW')
+    print(f'--- Optimal PEM capacity is         {opt_PEM  * 1e-3} MW')
+    print(f'--- Optimal H2 Tank capacity is     {opt_H2Tank} kg')
+    print(f'--- Optimal H2 Turbine capacity is  {opt_H2Turb * 1e-3} MW')
 
     # storing and outputting optimal values to csv
     columns = []
@@ -1543,6 +1584,15 @@ class HERD(MOPED):
     # optimal capacities
     columns.extend(['PEM Size', 'H2 Tank Size', 'H2 Turbine Size'])
     values.extend([opt_PEM, opt_H2Tank, opt_H2Turb])
+
+    if "Renewables" in self._dispatches_model_name:
+      opt_Wind = pyo.value(mdl.windpower_capacity) # already in kW
+      opt_Batt = pyo.value(mdl.battery_capacity) # already in kW
+      print(f'--- Optimal Wind capacity is        {opt_Wind  * 1e-3} MW')
+      print(f'--- Optimal Battery capacity is     {opt_Batt  * 1e-3} MW')
+
+      columns.extend(['Windpower Size', 'Battery Size'])
+      values.extend([opt_Wind, opt_Batt])
     # outputting to csv
     output_data = pd.DataFrame([values], columns=columns)
     output_data.to_csv(f'opt_solution__{case_name}.csv')
@@ -1559,7 +1609,7 @@ class HERD(MOPED):
     time_start = time.time()
     # original workflow from MOPED
     self.buildGlobalSettings()
-    self.buildEconSettings()  # overloaded method
+    self.buildEconSettings()  # MOPED method
     self.buildComponentMeta() # overloaded method
     self.buildCashflowMeta()  # MOPED method
     self.collectResources()   # MOPED method (TODO: needed?)
