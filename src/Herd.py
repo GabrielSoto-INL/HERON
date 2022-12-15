@@ -833,7 +833,7 @@ class HERD(MOPED):
     unfix_dof_options = self._multiperiod_options['unfix_dof_options']
     staging_params    = self._multiperiod_options['staging_params']
 
-    function_links = self._get_process_functions_for_idaes(staging_params=staging_params)
+    function_links = self._link_process_functions_for_idaes(staging_params=staging_params)
 
     # NOTE: within the build process, a tmp JSON file is created in wdir...
     self._dmdl = MultiPeriodModel(
@@ -914,7 +914,6 @@ class HERD(MOPED):
       @ Out, multiperiod_options, dict, extra arguments for flowsheet and ancilliary methods
     """
     multiperiod_options = {}
-
     if "Nuclear" in self._dispatches_model_name:
       # TODO: these should be populated from a mix of XML input and External function
       # wrapping fs options in a dict allows extraction downstream and keeps staging_params intact
@@ -932,19 +931,15 @@ class HERD(MOPED):
     elif "Renewables" in self._dispatches_model_name:
       # if external function for extra input parameters is found...
       if len(self._external_func) > 0:
-        # check for wind data
-        wind_data = None
-        wind_keyword  = set(self._synth_histories.keys()).intersection(['WIND', 'Wind', 'wind'])
-        if len(wind_keyword) > 0:
-          wind_data = self._synth_histories[wind_keyword.pop()]['signals']
-        # check for price data
-        price_data = None
-        price_keyword = set(self._synth_histories.keys()).intersection(['PRICE', 'Price', 'price'])
-        if len(price_keyword) > 0:
-          price_data = self._synth_histories[price_keyword.pop()]['signals']
         # get appropriate method and use wind/price data as inputs
         methods = getattr(self._external_func[0], '_module_methods')
-        extra_params = methods['load_parameters'](self._time_sets, wind_data, price_data)
+      else:
+        raise IOError("Renewables Case Study requires extranous function to define Wind speeds.")
+      # check for wind data
+      wind_data = self._get_data_from_synth_histories('Wind')
+      # check for price data
+      price_data = self._get_data_from_synth_histories('Price')
+      extra_params = methods['load_parameters'](self._time_sets, wind_data, price_data)
       # set rest of parameters with empty dicts (except for staging parameters)
       multiperiod_options['flowsheet_options'] = {'fs_options':{} }
       multiperiod_options['initialization_options'] = {}
@@ -954,7 +949,30 @@ class HERD(MOPED):
       raise IOError("Unexpected DISPATCHES model name.")
     return multiperiod_options
 
-  def _get_process_functions_for_idaes(self, staging_params):
+  def _get_data_from_synth_histories(self, data_key):
+    """
+      Helper method for extracting data from a saved synthetic history.
+      Checks for the data keyword given as input within the stored dictionary
+      and if found, returns the data. If not, returns None.
+      @ In, data_key, str, name of data entry to get from dictionary
+      @ In, fs_options, dict, arguments for flowsheet
+      @ In, staging_params, dict, extra arguments not intended for flowsheet
+      @ Out, data, dict or None, extracted data if exists else returns None
+    """
+    #initialize data object
+    data = None
+    # get data keys from the synthetic histories saved to self
+    synth_data_keys = set(self._synth_histories.keys())
+    # create set for possible data names (have seen them in all lowercase, all uppercase, etc.)
+    input_data_key_set = {data_key, data_key.lower(), data_key.upper()}
+    # get matching keyword if it exists
+    data_keyword = synth_data_keys.intersection(input_data_key_set)
+    # extract data if it exists
+    if len(data_keyword) > 0:
+      data = self._synth_histories[data_keyword.pop()]['signals']
+    return data
+
+  def _link_process_functions_for_idaes(self, staging_params):
 
     function_links = {}
     if "Nuclear" in self._dispatches_model_name:
@@ -976,6 +994,7 @@ class HERD(MOPED):
       function_links['unfix_dof_func'] = self.unfixDof
       function_links['link_var_pairs_func'] = partial(wind_battery_pem_tank_turb_variable_pairs,
                                                        tank_type=staging_params['tank_type'])
+      # FIXME: periodic variable pairs dont get used in stochastic MultiPeriod, add manually
       function_links['periodic_var_pairs_func'] = partial(
                                                 wind_battery_pem_tank_turb_periodic_variable_pairs,
                                                 tank_type=staging_params['tank_type'])
@@ -1002,21 +1021,20 @@ class HERD(MOPED):
       wind_rsrc = staging_params['wind_resource'][period]['wind_resource_config']
 
     if isinstance(mdl, pyo.ConcreteModel):
-      # building a simple model for the initialization method
-      # NOTE: this will be deprecated in the near future
+      # building simple model for the initialization method
       mdl = self._flowsheet(mdl, **fs_options)
     else:
       # this means mdl is a _BlockData object, being called from `build_stochastic_multi_period` for
       # a given period (e.g., hr:10, d:2, yr:2022)
+      # if this is the first call, creates a Pyomo model with flowsheet attributes
+      # then saves it to the staging_params dictionary.
+      # on subsequent calls, it just pulls the saved model, clones it, and transfers
+      # attributes to current period model
       if 'pyo_model' not in staging_params.keys():
-        # if this is the first call, creates a Pyomo model with flowsheet attributes
-        # then saves it to the staging_params dictionary.
         if "wind_resource" in staging_params.keys():
           staging_params['pyo_model'] = self._flowsheet(wind_resource_config=wind_rsrc, **fs_options)
         else:
           staging_params['pyo_model'] = self._flowsheet(**fs_options)
-      # on subsequent calls, it just pulls the saved model, clones it, and transfers
-      # attributes to current period model
       mdl.transfer_attributes_from(staging_params['pyo_model'].clone())
 
     if "wind_resource" in staging_params.keys():
