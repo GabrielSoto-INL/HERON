@@ -17,11 +17,11 @@ import numpy as np
 import _utils as hutils
 
 # Nuclear flowsheet function imports
-from dispatches.case_studies.nuclear_case.nuclear_flowsheet import build_ne_flowsheet
-from dispatches.case_studies.nuclear_case.nuclear_flowsheet import fix_dof_and_initialize
+from dispatches.models.nuclear_case.flowsheets.nuclear_flowsheet import build_ne_flowsheet
+from dispatches.models.nuclear_case.flowsheets.nuclear_flowsheet import fix_dof_and_initialize
 
 # Import function for the construction of the multiperiod model
-from dispatches.case_studies.nuclear_case.multiperiod import build_multiperiod_design
+from dispatches.models.nuclear_case.flowsheets.multiperiod import build_multiperiod_design
 
 from idaes.core.solvers import get_solver
 
@@ -137,7 +137,7 @@ class HERD(MOPED):
       globalEcon = getattr(self._case,"_global_econ")
       globalEcon["ProjectTime"] = self._testProjLife
       # intended years to test out (2022-2031, use same data. 2032-2041, use same data)
-      self._testYears = [2022, 2032]
+      self._testYears = [2022, ]
     # now run parent method
     super().buildEconSettings(verbosity)
     self._num_samples = getattr(self._case,"_num_samples")
