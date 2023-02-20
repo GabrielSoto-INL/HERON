@@ -550,7 +550,7 @@ class HERD(MOPED):
       @ In, multiplier, int/float, value to multiply synthetic history evaluations by
       @ Out, synthetic_data, dict, contains data from evaluated ROM
     """
-    if signal.lower() == 'price' and np.sign(multiplier) < 0:
+    if signal == 'Signal' and multiplier == -1:
       multiplier *= -1 # undoing negative multiplier from one step above, price != demand
 
     # NOTE self._sources[0]._var_names are the user assigned signal names in DataGenerators

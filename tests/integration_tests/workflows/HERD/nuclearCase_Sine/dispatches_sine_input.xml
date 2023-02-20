@@ -269,6 +269,7 @@
 
   <DataGenerators>
     <ARMA name='LMP' variable="Signal">%BASE_WORKING_DIR%/../../../../ARMA/Sine/arma.pk</ARMA>
+    <Function name="input-params">extra_input_parameters.py</Function>
   </DataGenerators>
 
 </HERON>
