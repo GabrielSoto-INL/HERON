@@ -97,21 +97,14 @@ DISPATCHES_MODEL_COMPONENT_META={
                           'fs.h2_turbine.turbine.work_mechanical',
                           'fs.h2_turbine.compressor.work_mechanical'
                          ],
-          "Multiplier":  [-1, -1] # extra multiplier to ensure correct sign
-        },
-      },
     },
     "electricity_market":{
-      "Demands":  'electricity',
       "Consumes": {},
       "Cashflows":{
         "Dispatch":{
-          "Expressions": [
-                          'fs.np_power_split.np_to_grid_port.electricity',
-                          'fs.h2_turbine.turbine.work_mechanical',
-                          'fs.h2_turbine.compressor.work_mechanical'
-                         ],
-          "Multiplier":  [1e-3, -1e-6, -1e-6] # NOTE: h2 turbine is in W, convert to kW
+          "Expressions": ['fs.np_power_split.np_to_grid_port.electricity',
+            'fs.h2_turbine.work_mechanical'],
+          "Multiplier":  [1e-3, -1e-6] # NOTE: h2 turbine is in W, convert to kW
         },
       },
     },
@@ -1556,7 +1549,8 @@ class HERD(MOPED):
     weights = self._time_sets['weights_scenarios']
 
     # pyomo expression for full metric wtih scenario weights applied
-    Metric = np.sum( weights[n]*scenario['NPV'] for n, scenario in enumerate(self._metrics) )
+    N = getattr(self, "_num_samples")
+    Metric = self._metrics[-1]['NPV'] / N # TODO: temp fix, things are getting duplicated somewhere
 
     # set objective
     self._dmdl.obj = pyo.Objective(expr=Metric*1e-9, sense=pyo.maximize)

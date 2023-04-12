@@ -398,6 +398,12 @@ class Interaction(Base):
               of the value of this node.""")
     specs.addSub(cap)
 
+    descr = r"""the actual value at which this component can act, as a unitless fraction of total rated capacity.
+            Note that these factors are applied within the dispatch optimization; we assume that the capacity factor
+            is not a variable in the outer optimization."""
+    capfactor = vp_factory.make_input_specs('capacity_factor', descr=descr, allowed=['ARMA', 'CSV'])
+    specs.addSub(capfactor)
+
     descr = r"""provides the minimum value at which this component can act, in units of the indicated resource. """
     minn = vp_factory.make_input_specs('minimum', descr=descr)
     minn.addParam('resource', param_type=InputTypes.StringType,
@@ -416,6 +422,7 @@ class Interaction(Base):
     Base.__init__(self, **kwargs)
     self._capacity = None               # upper limit of this interaction
     self._capacity_var = None           # which variable limits the capacity (could be produced or consumed?)
+    self._capacity_factor = None        # ratio of actual output as fraction of _capacity
     self._signals = set()               # dependent signals for this interaction
     self._crossrefs = defaultdict(dict) # crossrefs objects needed (e.g. armas, etc), as {attr: {tag, name, obj})
     self._dispatchable = None           # independent, dependent, or fixed?
@@ -439,7 +446,7 @@ class Interaction(Base):
     self._dispatchable = specs.parameterValues['dispatch']
     for item in specs.subparts:
       name = '_' + item.getName()
-      if name in ['_capacity', '_minimum']:
+      if name in ['_capacity', '_capacity_factor', '_minimum']:
         # common reading for valued params
         self._set_valued_param(name, comp_name, item, mode)
         if name == '_capacity':
@@ -486,9 +493,14 @@ class Interaction(Base):
       @ Out, meta, dict, additional variable passthrough
     """
     if raw:
+      #NOTE: not returing capacity_factor since it will not be used as a variable
       return self._capacity
     meta['request'] = {self._capacity_var: None}
     evaluated, meta = self._capacity.evaluate(meta, target_var=self._capacity_var)
+    # apply capacity factor to get actual capacity for given timestep
+    if self._capacity_factor is not None:
+      capacity_factor = self._capacity_factor.evaluate(meta, target_var=self._capacity_var)[0]
+      evaluated[self._capacity_var] *= capacity_factor[self._capacity_var]
     return evaluated, meta
 
   def get_capacity_var(self):
@@ -896,9 +908,10 @@ class Storage(Interaction):
     # TODO unused, please implement ... :
     # descr = r"""the limiting charge/discharge rate of this storage. """
     # specs.addSub(ValuedParam.get_input_specs('rate'))
-    descr=r"""initial quantity of resource assumed to be present in the storage unit at the beginning
-          of a given calculation, in units of quantity (not rate). \default{0}. """
-    specs.addSub(vp_factory.make_input_specs('initial_stored', descr=descr))
+    descr=r"""indicates what percent of the storage unit is full at the start of each optimization sequence,
+              from 0 to 1. \default{0.0}. """
+    sub = vp_factory.make_input_specs('initial_stored', descr=descr)
+    specs.addSub(sub)
     descr=r"""control strategy for operating the storage. If not specified, uses a perfect foresight strategy. """
     specs.addSub(vp_factory.make_input_specs('strategy', allowed=['Function'], descr=descr))
     descr = r"""round-trip efficiency for this component as a scalar multiplier. \default{1.0}"""
@@ -938,11 +951,11 @@ class Storage(Interaction):
         self._set_valued_param('_strategy', comp_name, item, mode)
       elif item.getName() == 'RTE':
         self._sqrt_rte = np.sqrt(item.value)
-    assert len(self._stores) == 1, 'Multiple storage resources given for component "{}"'.format(comp_name)
+    assert len(self._stores) == 1, f'Multiple storage resources given for component "{comp_name}"'
     self._stores = self._stores[0]
     # checks and defaults
     if self._initial_stored is None:
-      self.raiseAWarning('Initial storage level for "{}" was not provided! Defaulting to 0.'.format(comp_name))
+      self.raiseAWarning(f'Initial storage level for "{comp_name}" was not provided! Defaulting to 0%.')
       # make a fake reader node for a 0 value
       vp = ValuedParamHandler('initial_stored')
       vp.set_const_VP(0.0)
@@ -1103,7 +1116,13 @@ class Storage(Interaction):
     res = self.get_resource()
     request = {res: None}
     meta['request'] = request
-    return self._initial_stored.evaluate(meta, target_var=res)[0][res]
+    pct = self._initial_stored.evaluate(meta, target_var=res)[0][res]
+    if not (0 <= pct <= 1):
+      self.raiseAnError(ValueError, f'While calculating initial storage level for storage "{self.tag}", ' +
+          f'an invalid percent was provided/calculated ({pct}). Initial levels should be between 0 and 1, inclusive.')
+    amt = pct * self.get_capacity(meta)[0][res]
+    return amt
+
 
 
 
