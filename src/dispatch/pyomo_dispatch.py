@@ -185,6 +185,7 @@ class Pyomo(Dispatcher):
         specific_time, start_index, case, components, sources, resources, initial_levels, meta
       )
       print(f'DEBUGG solve time: {solve_time} s')
+      dispatch.set_elapsed_time(solve_time)
 
       # Store Results of optimization into dispatch container
       for comp in components:
@@ -309,7 +310,14 @@ class Pyomo(Dispatcher):
       attempts += 1
       print(f'DEBUGG using solver: {self._solver}')
       print(f'DEBUGG solve attempt {attempts} ...:')
-      soln = pyo.SolverFactory(self._solver).solve(m.model, options=self.solve_options)
+      if self._solver in ['ipopt', 'cbc']:
+        soln = pyo.SolverFactory(self._solver, executable=f'~/.conda/envs/raven_libraries/bin/{self._solver}').solve(m.model, options=self.solve_options)
+      elif self._solver == 'glpk':
+        soln = pyo.SolverFactory(self._solver, executable=f'~/.conda/envs/raven_libraries/bin/glpsol').solve(m.model, options=self.solve_options)
+      elif self._solver == 'cplex':
+        soln = pyo.SolverFactory(self._solver, executable='/apps/local/cplex/CPLEX_Studio201/cplex/bin/x86-64_linux/cplex').solve(m.model, options=self.solve_options)
+      else:
+        soln = pyo.SolverFactory(self._solver).solve(m.model, options=self.solve_options)
 
       # check solve status
       if soln.solver.status == SolverStatus.ok and soln.solver.termination_condition == TerminationCondition.optimal:

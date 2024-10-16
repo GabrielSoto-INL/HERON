@@ -131,6 +131,7 @@ class NumpyState(DispatchState):
     for comp in components:
       for tag in comp.get_tracking_vars():
         self._data[f'{comp.name}_{tag}'] = np.zeros((len(self._resources[comp]), len(times)))
+    self._data['window_timeElapsed'] = None
 
   def __repr__(self):
     """
@@ -141,15 +142,16 @@ class NumpyState(DispatchState):
     msg = StringIO()
     msg.write('<HERON NumpyState dispatch record: \n')
     for key, act_data in self._data.items():
-      name, activity = key.split('_')
+      name, activity = key.rsplit('_',1)
       # find corresponding component
       for comp, resources in self._resources.items():
         if comp.name == name:
           break
       resources = self._resources[comp]
       msg.write(f'   component: {name} activity: {activity}\n')
-      for res, r in resources.items():
-        msg.write(f'      {res}: {act_data[r]}\n')
+      if name != 'window':
+        for res, r in resources.items():
+            msg.write(f'      {res}: {act_data[r]}\n')
     msg.write('END NumpyState dispatch record>')
     return msg.getvalue()
 
@@ -199,6 +201,17 @@ class NumpyState(DispatchState):
 
     r = self._resources[comp][res]
     self._data[f'{comp.name}_{tracker}'][r, start_idx:end_idx] = values
+
+  def set_elapsed_time(self, solve_time, **kwargs):
+    """
+    """
+    self._data['window_timeElapsed'] = solve_time
+
+  def get_elapsed_time(self, **kwargs):
+    """
+    """
+    return self._data['window_timeElapsed']
+
 
 # DispatchState for Pyomo dispatcher
 class PyomoState(DispatchState):
