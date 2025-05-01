@@ -1032,6 +1032,7 @@ class Case(Base):
     # should we replace the inner objective function?
     #   from sum of marginal cashflows -> levelized cost of marginal cashflows
     self.use_levelized_inner = self.determine_inner_objective(components)
+    self.check_component_cashflows(components)
 
   def __repr__(self):
     """
@@ -1106,7 +1107,7 @@ class Case(Base):
 
     # 1. check first that there is a levelized cost CashFlow in any of available components
     if not levelized_cfs:
-      self.raiseAnError('Levelized Cost metric was selected, but no <levelized_cost> node was ' +
+      self.raiseAnError(IOError, 'Levelized Cost metric was selected, but no <levelized_cost> node was ' +
                         'found in component Cash Flows! \n' +
                         'The levelized cost subnode should be under the <reference_price> node')
 
@@ -1132,13 +1133,52 @@ class Case(Base):
     # TODO: should compile a list of linear vs nonlinear solvers...
     if self.dispatcher.get_solver() in ['glpk', 'cbc']:
       appropriate_solvers = ['ipopt']
-      self.raiseAnError('Levelized Cost metric requires a nonlinear optimization in the inner' +
+      self.raiseAnError(IOError, 'Levelized Cost metric requires a nonlinear optimization in the inner' +
                         f' step, please use any of the following solvers: {appropriate_solvers}')
 
     # for all remaining levelized cash flows, get tracker and resource for related Activity (saving it to component)
     for comp, cfs in levelized_cfs.items():
       comp.set_levelized_cost_meta(cfs)
     return use_levelized_inner
+
+  def check_component_cashflows(self, components):
+    """
+    """
+    project_life   = self.get_econ(components)['ProjectTime']
+    comp_data_to_check = []
+    for comp in components:
+      comp_econ = comp.get_economics()
+      comp_starttime = comp_econ.get_starttime()
+      if comp_starttime == 0:
+        continue
+
+      comp_lifetime = comp_econ.get_lifetime()
+      if comp_lifetime + comp_starttime > project_life:
+        comp_data_to_check.append(  (comp, comp_starttime, comp_lifetime) )
+
+    if not comp_data_to_check:
+      return
+
+    exempt_vps = set(['Function'])
+    for comp, start, life in comp_data_to_check:
+      for cf in comp.get_cashflows():
+        if cf.get_type()!='one-time':
+          continue
+
+        depreciation = cf.get_depreciation()
+        if depreciation:
+          if start + depreciation + 1 >= 0:
+            continue
+
+        crossref_types = set(cr.type for cr in cf.get_crossrefs().values())
+        if exempt_vps.issubset(crossref_types):
+          continue
+
+        msg =  "ERROR: "
+        msg += f"Start-Time ({start} yrs) + Component Lifetime ({life} yrs) > Project Time ({project_life} yrs).\n"
+        msg += "The component was built prior to the simulation start and will not be rebuilt during the project.\n"
+        msg += f"One-Time Cashflow '{cf.name}' is therefore not necessary, please remove."
+        self.raiseAnError(IOError, msg)
 
   #### ACCESSORS ####
   def get_increments(self):

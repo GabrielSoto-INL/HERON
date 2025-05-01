@@ -452,6 +452,7 @@ class DispatchRunner:
       teal_comp = TEAL.src.CashFlows.Component()
       teal_comp_params = {'name': comp_name,
                         'Life_time': cfg.get_lifetime(),
+                        'StartTime': cfg.get_starttime(),
                         # TODO StartTime, Repetitions, custom tax/inflation rate
                        }
       teal_comp.setParams(teal_comp_params)

@@ -121,6 +121,13 @@ class CashFlowGroup:
         descr=r"""indicates the number of \emph{cycles} (often \emph{years}) this unit is expected
               to operate before replacement. Replacement is represented as overnight capital cost
               in the year the component is replaced."""))
+    specs.addSub(InputData.parameterInputFactory('starttime', contentType=InputTypes.IntegerType,
+        descr=r"""the year marking the beginning of the first component lifetime. By default, this
+              is Year 0, where most components are assumed to be constructed. If this value is negative,
+              then the component is assumed to have been built prior to the simulation and therefore any
+              initial CAPEX costs are ignored. Note that replacements are still calculated if the lifetime
+              is less than the project time. Positive start times are currently not implemented.
+              \default{0}"""))
     cf = CashFlow.get_input_specs()
     specs.addSub(cf)
     return specs
@@ -134,6 +141,7 @@ class CashFlowGroup:
     self.name = component.name
     self._component = component # component this one
     self._lifetime = None # lifetime of the component
+    self._starttime = 0 # starttime of the component (currently only negative)
     self._cash_flows = []
 
   def read_input(self, source, xml=False):
@@ -151,12 +159,23 @@ class CashFlowGroup:
       specs = source
     # read in specs
     for item in specs.subparts:
-      if item.getName() == 'lifetime':
-        self._lifetime = item.value
-      elif item.getName() == 'CashFlow':
-        new = CashFlow(component=self._component)
-        new.read_input(item)
-        self._cash_flows.append(new)
+      match item.getName():
+        case 'lifetime':
+          self._lifetime = item.value
+        case 'starttime':
+          self._starttime = item.value
+        case 'CashFlow':
+          new = CashFlow(component=self._component)
+          new.read_input(item)
+          self._cash_flows.append(new)
+        case _:
+          raise IOError(f'Unrecognized <economics> subnode: {item.getName()}')
+
+    # some checking
+    if self._starttime>0:
+      msg = "Positive start times are currently not implemented in HERON."
+      msg += f"<starttime> can only be 0 or a negative integer. Detected: {self._starttime}"
+      raise IOError(msg)
 
   def get_crossrefs(self):
     """
@@ -230,6 +249,14 @@ class CashFlowGroup:
       @ Out, lifetime, int, lifetime
     """
     return self._lifetime
+
+  def get_starttime(self):
+    """
+      Provides the starttime of this cash flow user.
+      @ In, None
+      @ Out, starttime, int, starttime
+    """
+    return self._starttime
 
   def check_if_finalized(self):
     """
