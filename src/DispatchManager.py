@@ -10,6 +10,8 @@ import os
 import sys
 import pickle as pk
 from time import time as run_clock
+import copy
+from functools import partial
 
 import numpy as np
 from typing_extensions import final
@@ -224,7 +226,12 @@ class DispatchRunner:
                     f'({list(range(*structure["interpolated"]))}) ' +
                     f'than requested project years ({project_life})!')
     # do the dispatching and calculate the component's total activity
-    all_dispatch, metrics, tot_activity = self._do_dispatch(meta, all_structure, project_life, interp_years, segs)
+
+    if meta['HERON']['Case']._npv_target:
+      meta = self._npv_target_bisection(meta, all_structure, project_life, interp_years, segs)
+      all_dispatch, metrics, tot_activity = self._do_dispatch(meta, all_structure, project_life, interp_years, segs)
+    else:
+      all_dispatch, metrics, tot_activity = self._do_dispatch(meta, all_structure, project_life, interp_years, segs)
     return all_dispatch, metrics, tot_activity
 
   def save_variables(self, raven, all_dispatch, metrics, tot_activity):
@@ -296,6 +303,105 @@ class DispatchRunner:
 
   #####################
   # UTILITIES
+  def _npv_target_bisection(self, meta, all_structure, project_life, interp_years, segs):
+    """
+      perform dispatching
+      @ In, meta, dict, dictionary of passthrough variables
+      @ In: all_structure, dict, the dispatcher structure
+      @ In, project_life, int, total analysis years (e.g. 30)
+      @ In, interp_years, list, actual analysis tagged years (e.g. range(2015, 2045))
+      @ In, segs, list(int), segments/clusters/divisions
+      @ Out, dispatch_results, list(DispatchState), results of dispatch for each segment/cluster and year
+      @ Out, cf_metrics, dict, values for calculated metrics of final cashflow calculations
+      @ Out, tot_activity_over_all_years, dict, the total activity of each components over tue entire project life
+    """
+
+    NPV_target = meta['HERON']['Case']._npv_target
+    bounds = meta['HERON']['Case']._npv_target_bounds
+
+    just_in_case = copy.deepcopy(meta)
+    # meta['HERON']['Case']._npv_target = None
+    # meta['HERON']['Case']._npv_target_bounds = []
+    # meta['HERON']['Case']._global_econ['Indicator']['name'] = ['NPV']
+    # meta['HERON']['Case']._global_econ['Indicator']['target'] = None
+    self._case._global_econ['Indicator']['name'] = ['NPV']
+    self._case._global_econ['Indicator']['target'] = None
+    self._case._econ_metrics = {}
+    self._case._econ_metrics['NPV'] = self._case.economic_metrics_meta['NPV']
+    self._case._npv_target = None
+    self._case._npv_target_bounds = []
+
+    meta['HERON']['levelized_meta'] = {}
+    for i,comp in enumerate(self._components):
+      if comp.levelized_meta:
+        meta['HERON']['levelized_meta'][i] = []
+        for j,cf in enumerate(comp.get_cashflows()):
+          if cf.name in comp.levelized_meta:
+            cf._mult_target = False
+            meta['HERON']['levelized_meta'][i].append(j)
+
+    f = partial(self._modified_do_dispatch,
+                meta, all_structure, project_life, interp_years, segs, NPV_target)
+
+    iter_count = 0
+    max_iter   = 20
+    tol = 1e-7
+
+    a = np.min(bounds)
+    b = np.max(bounds)
+
+    # first evaluations
+    fA = f(a)
+    fB = f(b)
+    print(f"============ LOWER BOUND EVAL: f({a}) = {fA}")
+    print(f"============ UPPER BOUND EVAL: f({b}) = {fB}")
+    assert fA*fB >= 0, "function evaluations must be opposite signs at the bounds"
+
+    midpoint = 0
+    while (b - a) / 2.0 > tol and iter_count < max_iter:
+      midpoint = (a + b) / 2.0
+      fM = f(midpoint)
+      print(f"============ NEXT EVAL {iter_count}: {fM}")
+      if fM < tol:
+        break
+      if fA * fM < 0:
+        b = midpoint
+      else:
+        a = midpoint
+      iter_count += 1
+
+    for i,cfs in meta['HERON']['levelized_meta'].items():
+      for j in cfs:
+        match self._components[i]._economics._cash_flows[j]._alpha._vp.type:
+          case 'FixedValue':
+            self._components[i]._economics._cash_flows[j]._alpha.set_const_VP(midpoint)
+          case 'ARMA':
+            raise NotImplementedError()
+    return self._do_dispatch(meta, all_structure, project_life, interp_years, segs)
+
+  def _modified_do_dispatch(self, meta, all_structure, project_life, interp_years, segs, NPV_target, alpha):
+    """
+      perform dispatching
+      @ In, dummy_meta, dict, dictionary of passthrough variables
+      @ In: all_structure, dict, the dispatcher structure
+      @ In, project_life, int, total analysis years (e.g. 30)
+      @ In, interp_years, list, actual analysis tagged years (e.g. range(2015, 2045))
+      @ In, segs, list(int), segments/clusters/divisions
+      @ Out, dispatch_results, list(DispatchState), results of dispatch for each segment/cluster and year
+      @ Out, cf_metrics, dict, values for calculated metrics of final cashflow calculations
+      @ Out, tot_activity_over_all_years, dict, the total activity of each components over tue entire project life
+    """
+    for i,cfs in meta['HERON']['levelized_meta'].items():
+      for j in cfs:
+        match self._components[i]._economics._cash_flows[j]._alpha._vp.type:
+          case 'FixedValue':
+            self._components[i]._economics._cash_flows[j]._alpha.set_const_VP(alpha)
+          case 'ARMA':
+            raise NotImplementedError()
+
+    _, metrics, _ = self._do_dispatch(meta, all_structure, project_life, interp_years, segs)
+    return metrics['NPV'] - NPV_target
+
   def _do_dispatch(self, meta, all_structure, project_life, interp_years, segs):
     """
       perform dispatching

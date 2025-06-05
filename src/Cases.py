@@ -396,6 +396,12 @@ class Case(Base):
         metric.addParam('target', param_type=InputTypes.FloatType,
                             descr=r"""requested target for NPV search. In the case of levelized cost,
                             the NPV target is 0 which results in the break-even cost. \default{0}""")
+        # metric.addParam('method', param_type=InputTypes.makeEnumType('NPVSearchMethod', 'NPVSearchMethodType',
+        #                                    ['approximation', 'full']),
+                            # descr=r"""requested target for NPV search. In the case of levelized cost,
+                            # the NPV target is 0 which results in the break-even cost. \default{0}""")
+        metric.addParam('bounds', param_type=InputTypes.FloatListType,
+                            descr=r"""upper and lower bound of bisection interval \default{None}""")
       econ_metrics.addSub(metric)
     econ.addSub(econ_metrics)
     return econ
@@ -423,6 +429,8 @@ class Case(Base):
     opt_metric_sub.addParam('target', param_type=InputTypes.FloatType,
                             descr=r"""requested target for NPV search. In the case of levelized cost,
                             the NPV target is 0 which results in the break-even cost. \default{0}""")
+    opt_metric_sub.addParam('bounds', param_type=InputTypes.FloatListType,
+                            descr=r"""upper and lower bound of bisection interval \default{None}""")
     optimizer.addSub(opt_metric_sub)
 
     #== Statistic Metric ==#
@@ -624,6 +632,7 @@ class Case(Base):
     self._mode = None                  # extrema to find: opt, sweep
     self._econ_metrics = OrderedDict() # dict of economic metrics to return to user, return_statistics applied to each
     self._npv_target = None
+    self._npv_target_bounds = []
     self.use_levelized_inner = False
     self._default_econ_metric = 'NPV'  # default metric for both opt and sweep
     self._default_stats_metric = 'expectedValue' # default stats metric for opt/sweep metric
@@ -864,6 +873,7 @@ class Case(Base):
         # if requesting levelized cost (or NPV search), look for a target (default = 0 -> break-even cost)
         if sub.getName()  == 'LC':
           self._npv_target = sub.parameterValues.get('target', 0)
+          self._npv_target_bounds = sub.parameterValues.get('bounds', [])
     # remove metrics node before the for loop below
     if metrics_node is not None:
       econ_subnodes.remove(metrics_node)
@@ -894,6 +904,10 @@ class Case(Base):
       except KeyError:
         opt_settings['npv_target'] = 0
 
+      try:
+        opt_settings['npv_target_bounds'] = node.findFirst('opt_metric').parameterValues['bounds']
+      except KeyError:
+        opt_settings['npv_target_bounds'] = []
     # 2. check next for algorithm/strategy, need to handle this before "<convergence>"
     subparts = node.subparts
     algo_head_node = node.findFirst('algorithm')
@@ -1140,7 +1154,7 @@ class Case(Base):
     # for all remaining levelized cash flows, get tracker and resource for related Activity (saving it to component)
     for comp, cfs in levelized_cfs.items():
       comp.set_levelized_cost_meta(cfs)
-    return use_levelized_inner
+    return False #use_levelized_inner
 
   #### ACCESSORS ####
   def get_increments(self):
@@ -1174,7 +1188,7 @@ class Case(Base):
     if 'active' not in self._global_econ:
       _, target = self.get_opt_metric()
       indic = {'name': self.get_econ_metrics(nametype='TEAL_in'), # can be a list of strings
-               'target': target}
+               'target': target,}
       indic['active'] = []
       for comp in components:
         comp_name = comp.name
