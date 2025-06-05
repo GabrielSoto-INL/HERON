@@ -355,14 +355,14 @@ class DispatchRunner:
     fB = f(b)
     print(f"============ LOWER BOUND EVAL: f({a}) = {fA}")
     print(f"============ UPPER BOUND EVAL: f({b}) = {fB}")
-    assert fA*fB >= 0, "function evaluations must be opposite signs at the bounds"
+    assert fA*fB <= 0, "function evaluations must be opposite signs at the bounds"
 
     midpoint = 0
     while (b - a) / 2.0 > tol and iter_count < max_iter:
       midpoint = (a + b) / 2.0
       fM = f(midpoint)
       print(f"============ NEXT EVAL {iter_count}: {fM}")
-      if fM < tol:
+      if np.abs(fM) < tol:
         break
       if fA * fM < 0:
         b = midpoint
